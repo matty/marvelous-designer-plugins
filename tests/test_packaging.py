@@ -460,6 +460,18 @@ def test_the_window_opens_and_start_makes_it_serve(monkeypatch) -> None:
         assert panels[0].ticks, "the window is refreshed by the serve loop, not itself"
 
 
+def _wait_for_tick(panel, before: float, timeout: float = 5.0) -> bool:
+    """Whether the loop goes round again. It sleeps POLL_INTERVAL between ticks, so a
+    loaded runner can put a scheduling gap between the last bridge call and the next
+    tick -- reading the counter in the same instant tests the runner, not the loop."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if panel.ticks > before:
+            return True
+        time.sleep(0.02)
+    return False
+
+
 def test_stop_in_the_window_closes_the_port_and_keeps_the_window(monkeypatch) -> None:
     with panelled_listener(monkeypatch) as (_, _, panels, _):
         panel = panels[0]
@@ -469,7 +481,7 @@ def test_stop_in_the_window_closes_the_port_and_keeps_the_window(monkeypatch) ->
 
         assert _wait_until_silent(), "Stop left the port open"
         assert not panel.closed
-        assert panel.ticks > before, "the loop stopped running when the bridge did"
+        assert _wait_for_tick(panel, before), "the loop stopped running when the bridge did"
 
 
 def test_start_in_the_window_binds_the_port_again(monkeypatch) -> None:

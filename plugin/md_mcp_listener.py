@@ -77,10 +77,16 @@ HOST = "127.0.0.1"
 #: Must match ``MD_MCP_PORT`` on the md-mcp side.
 PORT = int(os.environ.get("MD_MCP_PORT", "5121"))
 
-#: How long a connected peer has to send its request line before we drop it. The loop is
-#: serial, so a peer that connects and then says nothing -- a port scanner, a stray
-#: browser tab -- would otherwise hold the bridge for as long as it liked.
+#: How long a connected peer has to finish sending its request line once it has started.
 REQUEST_TIMEOUT = 5.0
+
+#: How long a peer that has sent *nothing at all* is given before it is dropped. The loop
+#: is serial, so a peer that connects and then says nothing -- a port scanner, a stray
+#: browser tab -- holds the bridge for exactly this long, and giving it the whole
+#: REQUEST_TIMEOUT made that hold as long as the client's own ping timeout: the next real
+#: request would time out rather than queue. A client sends immediately after connecting
+#: (md_mcp.bridge does it in the next statement), so a second is already generous.
+SILENT_PEER_TIMEOUT = 1.0
 
 #: How long the loop waits for a connection before pumping MD's message queue again.
 #: Short enough that MD's UI stays smooth, long enough that idling costs nothing.
@@ -316,10 +322,15 @@ def _handle(request, state):
 def _read_request(connection, pump):
     """Read one line from a connected peer, pumping MD while we wait for it."""
     deadline = time.time() + REQUEST_TIMEOUT
+    first_byte_deadline = time.time() + SILENT_PEER_TIMEOUT
     buffer = b""
     connection.setblocking(False)
     while b"\n" not in buffer:
-        if time.time() > deadline:
+        now = time.time()
+        # Two deadlines: one for a peer that is talking and slow, a much shorter one for
+        # a peer that has not said a word. Only the second one can be triggered by
+        # somebody who is not a client at all.
+        if now > deadline or (not buffer and now > first_byte_deadline):
             return None
         try:
             chunk = connection.recv(65536)
@@ -376,6 +387,13 @@ def _serve_connection(connection, state, pump):
 def _bind(port):
     """Bind the port this session answers on. Raises if it cannot."""
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    if os.name != "nt":
+        # Stop then Start is a button here, and on POSIX the port sits in TIME_WAIT for
+        # a minute or two after the old socket closes -- long enough that the Start
+        # fails with EADDRINUSE and reads as "something else has the port". Not set on
+        # Windows on purpose: there SO_REUSEADDR lets a second process steal a port
+        # already bound, and Windows lets the rebind happen without it anyway.
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
         listener.bind((HOST, port))
         listener.listen(4)
