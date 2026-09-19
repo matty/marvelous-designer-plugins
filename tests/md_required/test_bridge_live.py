@@ -156,35 +156,53 @@ def test_setcamviewpoint_moves_the_camera_and_setviewpoint_does_not(tmp_path) ->
     assert spread(_snapshot_sizes(tmp_path, "SetViewPoint")) < 0.01
 
 
-def test_two_snapshots_of_one_unchanged_view_are_not_byte_identical(tmp_path) -> None:
+DIGESTS_FLAT_THEN_DRAPED = """
+import pattern_api, utility_api, export_api, os, hashlib, json
+
+def digests(tag):
+    out = []
+    for k in range(3):
+        utility_api.Refresh3DWindow()
+        p = os.path.join(r"{tmp_path}", "%s_%d.png" % (tag, k))
+        export_api.ExportSnapshot3D(p)
+        out.append(hashlib.sha256(open(p, "rb").read()).hexdigest())
+    return out
+
+utility_api.NewProject()
+utility_api.SetCamViewPoint(0)
+a = pattern_api.CreatePatternWithPoints(
+    [(0.0, 0.0, 0), (360.0, 0.0, 0), (360.0, 500.0, 0), (0.0, 500.0, 0)]
+)
+b = pattern_api.CreatePatternWithPoints(
+    [(500.0, 0.0, 0), (860.0, 0.0, 0), (860.0, 500.0, 0), (500.0, 500.0, 0)]
+)
+pattern_api.AddSeamlinePairGroup(a, 1, True, b, 3, False)
+flat = digests("flat")
+utility_api.Simulate(400)
+print(json.dumps({{"flat": flat, "draped": digests("draped")}}))
+"""
+
+
+def test_a_draped_scene_does_not_snapshot_to_the_same_bytes_twice(md, tmp_path) -> None:
     """So that nobody builds change-detection on a hash of the picture.
 
-    Sixteen captures at one camera position gave sixteen different digests, and repeated
-    Refresh3DWindow calls do not converge -- it is the encode, not settling.
-    """
-    try:
-        pieces = bridge.scene().get("pattern_count", 0)
-    except bridge.BridgeError as exc:
-        pytest.skip(str(exc))
-    if not pieces:
-        pytest.skip("needs a non-empty scene")
+    Sixteen captures of a draped 56-piece garment at one camera position gave sixteen
+    different digests, and repeated Refresh3DWindow calls do not converge.
 
-    digests = json.loads(
+    It takes cloth to show it, which is why this builds its own scene rather than using
+    whatever is open: measured 2026-09-19 on 2026.0.315, three captures of an empty
+    scene and three of these same two panels *before* simulating were byte-identical
+    every time, and only the draped ones diverged. So a stable hash says nothing either
+    -- there is no direction in which hashing a snapshot is evidence.
+    """
+    result = json.loads(
         bridge.run_script(
-            f"""
-import utility_api as u, export_api as e, os, hashlib, json
-u.SetCamViewPoint(0)
-out = []
-for k in range(3):
-    u.Refresh3DWindow()
-    p = os.path.join(r"{tmp_path}", "same_%d.png" % k)
-    e.ExportSnapshot3D(p)
-    out.append(hashlib.sha256(open(p, "rb").read()).hexdigest())
-print(json.dumps(out))
-"""
-        )["output"]
+            DIGESTS_FLAT_THEN_DRAPED.format(tmp_path=str(tmp_path).replace("\\", "/")),
+            timeout=300,
+        )["output"].strip().splitlines()[-1]
     )
-    assert len(set(digests)) == len(digests), "bytes were stable; revisit the docs"
+
+    assert len(set(result["draped"])) > 1, "draped bytes were stable; revisit the docs"
 
 
 def test_seam_groups_can_be_listed_per_piece_and_stay_in_range() -> None:
@@ -292,3 +310,17 @@ def test_a_live_search_carries_both_the_signature_and_the_note(md_live) -> None:
 
     assert entry["signatures"], "MD's own signature must survive annotation"
     assert "solver steps" in entry["note"]
+
+
+def test_a_wide_string_twin_of_a_measured_call_arrives_annotated(md_live) -> None:
+    # The inheritance is only worth having if the twin MD reports is the name the note
+    # is keyed off by one letter. Proven against the live build rather than a list:
+    # 82 of this build's members are ...W forms, and 15 of them stand next to a note.
+    from md_mcp import notes
+
+    found = {c["call"]: c for c in bridge.api("ExportOBJ")}
+
+    assert "export_api.ExportOBJW" in found, "the build stopped shipping the wide twin"
+    assert "narrow-string twin" in found["export_api.ExportOBJW"]["note"]
+    assert "Measured on" not in found["export_api.ExportOBJ"]["note"]
+    assert notes.note_for("export_api.ExportOBJ") in found["export_api.ExportOBJW"]["note"]

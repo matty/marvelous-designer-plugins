@@ -245,9 +245,12 @@ the coding off; `0`, `1` and `2` all showed it.
 ### Settings
 
 `SetParticleDistanceOfPattern(_pattern, _mm)` round-trips through
-`GetParticleDistanceOfPattern` — the one per-piece physics setting that can be proven
-rather than merely accepted. `SetPatternFreeze` and `SetAddlThicknessCollision` are
-accepted and have no readback.
+`GetParticleDistanceOfPattern`. So does `SetAddlThicknessCollision` — but its reader is
+spelled **`GetAddlThicknessCollisionValue`**, and since `GetAddlThicknessCollision` (the
+name anyone would search for) does not exist, the setter reads as write-only when it is
+not. It answered `2.5` and `1.0` for two pieces of the same garment, so it is real
+per-piece state and not a constant (measured 2026-09-19, 2026.0.315). `SetPatternFreeze`
+is the one with no reader anywhere in the six modules.
 
 **`SetSimulationQuality` takes two ints, not one**, matching `GetSimulationQuality()`,
 which returns a pair. One argument raises `TypeError: incompatible function arguments` —
@@ -287,6 +290,11 @@ still answers with a full-looking record (`{'ArrangementName': 'Arrangement Poin
 Arrangement points come with Library avatars, which this edition does not have. Without
 them a garment can still be drafted, sewn, simulated and exported — it simply falls
 rather than draping on the body.
+
+**An imported avatar can carry them, so the empty list is not a property of the edition.**
+The `Nardo` avatar imported from `.obj` reported 109 named points (`Arm_Back_1_L`,
+each with offsets, orientation and a `Curved`/`Flat` type) on 2026-09-19, 2026.0.315.
+Read `GetArrangementList()` rather than assuming either way.
 
 ---
 
@@ -407,13 +415,23 @@ of the piece".** An off-by-one that produces `-1` silently does the whole piece.
 
 ## Reading a scene back
 
-**`GetPatternInputInformation`'s `PointList[0]` is a header, not a point.** It is
-`{"Point count": "6"}`, and the six points follow at indices 1..6. Iterating the list
-straight raises `KeyError: 'Point positionX'` on the first element.
+**Both information calls hand back a JSON string, not a dict.** Measured 2026-09-19 on
+2026.0.315: `GetPatternInformation(0)` and `GetPatternInputInformation(0)` both return
+`str`, so `.keys()` raises `AttributeError` and `[...]` raises `TypeError: string
+indices must be integers` — which reads as the call being broken rather than as needing
+`json.loads`. Parsed, the input information is
+`{"Pattern InputInformation": [ {...} ]}` — **the key contains a space** — holding one
+record per call with `Pattern index`, `Pattern name`, `LineList` and `PointList`.
 
-`GetPatternInformation` returns id, name, uuid and thumbnail — **no geometry**, despite
-its documentation. `GetPatternInputInformation` is the one with per-line and per-point
-data, including line lengths and types.
+**`PointList[0]` is a header, not a point**, and so is `LineList[0]`: they are
+`{"Point count": "8"}` and `{"Line count": "8"}`, with the data following at 1..n.
+Iterating either straight raises `KeyError: 'Point positionX'` on the first element. A
+line's `Line type` is `"Straight type"` for a straight line and `""` for a curved one.
+
+`GetPatternInformation` returns id, name, uuid, thumbnail, `isTrimItem` and
+`isSeamlessBlock` — **no geometry**, despite its documentation.
+`GetPatternInputInformation` is the one with per-line and per-point data, including line
+lengths and types.
 
 Its `PointList` holds **only the straight points**: a 7-point contour with 3 spline
 points reports 4. The interior of a sampled curve cannot be read back at all, so
@@ -508,12 +526,17 @@ garment, and the obvious-looking call fails silently.
 round the back. Follow it with `utility_api.Refresh3DWindow()` and then
 `export_api.ExportSnapshot3D(path)`. Verified by eye on 2026-09-19, 2026.0.315.
 
-**Snapshots of an unchanged scene are never byte-identical.** Sixteen captures of one
-garment at one camera position produced sixteen different SHA-256s, so comparing image
-bytes reports "changed" every time and proves nothing. It is not a settling effect;
-repeated `Refresh3DWindow` calls do not converge. **Compare the pictures, not their
-hashes** — which for two `SetViewPoint` values that hashed differently turned out to be
-the same view.
+**Snapshot bytes move once there is cloth, and hold still before that.** Sixteen
+captures of one draped garment at one camera position produced sixteen different
+SHA-256s, and repeated `Refresh3DWindow` calls do not converge. But the instability is
+not unconditional: measured 2026-09-19 on 2026.0.315, three captures of an empty scene
+were byte-identical, three of two sewn 360 × 500 mm panels *before* simulating were
+byte-identical, and the same three after `Simulate(400)` were not.
+
+So a hash is evidence in neither direction — it reports "changed" for a draped scene
+nobody touched, and "unchanged" is only ever as good as how little is in the scene.
+**Compare the pictures, not their hashes** — which for two `SetViewPoint` values that
+hashed differently turned out to be the same view.
 
 ---
 

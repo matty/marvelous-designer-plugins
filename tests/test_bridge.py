@@ -567,6 +567,51 @@ def test_a_note_is_added_beside_what_md_reported_not_instead_of_it(md) -> None:
                          "signatures": ["X() -> None"]}
 
 
+def test_a_wide_string_twin_carries_the_note_measured_on_its_narrow_form() -> None:
+    # MD ships a ...W form of most path-taking calls, and it is the one a caller reaches
+    # for on a Windows box with a non-ASCII home directory -- which was exactly the
+    # caller getting a bare signature while ExportOBJ carried the warning about the
+    # overload that never returns.
+    from md_mcp import notes
+
+    note = notes.note_for("export_api.ExportOBJW")
+
+    assert note is not None
+    assert "ImportExportOption overload" in note
+
+
+def test_an_inherited_note_says_which_call_it_was_measured_on() -> None:
+    # The text names ExportOBJ throughout. Handed over silently under ExportOBJW it would
+    # read as a claim that the W form is the one that hung for 300s, which nobody
+    # measured -- so the borrowing is stated rather than hidden.
+    from md_mcp import notes
+
+    assert notes.note_for("export_api.ExportOBJW").startswith(
+        "Measured on ExportOBJ, the narrow-string twin."
+    )
+
+
+def test_a_name_that_merely_ends_in_w_is_not_given_someone_elses_note() -> None:
+    # The trailing W is only a twin marker where the stem is something measured. Nothing
+    # else may inherit, or the annotation starts inventing measurements.
+    from md_mcp import notes
+
+    assert notes.note_for("pattern_api.GetPatternCountW") is None
+    assert notes.note_for("utility_api.SomethingNobodyMeasuredW") is None
+
+
+def test_an_inherited_note_is_added_beside_the_live_signature_too() -> None:
+    # Same contract as a direct note: MD's own reply survives annotation untouched.
+    from md_mcp import notes
+
+    entry = {"call": "fabric_api.GetFabricNameW", "signatures": ["GetFabricNameW(...)"]}
+
+    notes.annotate([entry])
+
+    assert entry["signatures"] == ["GetFabricNameW(...)"]
+    assert "reads as 'a fabric with no name'" in entry["note"]
+
+
 def test_a_call_with_nothing_measured_is_returned_untouched(md) -> None:
     # The notes annotate the live build; they never curate it. A call nobody has
     # measured still comes back, just without a note.

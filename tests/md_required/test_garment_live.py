@@ -143,10 +143,21 @@ def test_every_member_of_every_md_module_is_listed(md) -> None:
 
     assert modules == set(bridge.MD_MODULES)
     assert len(listed) > 650, len(listed)
+    # The empty search is the compact index: names only, and deliberately without the
+    # signatures, enum values and struct fields, which is ~99KB a caller who typed
+    # nothing did not ask for. Those arrive with a term -- below.
+    assert all(set(entry) == {"call"} for entry in listed)
+
+
+def test_an_enum_member_carries_its_value_and_an_option_struct_its_fields(md) -> None:
     # Enum members are values, not calls, and are listed with their repr so they can be
-    # recognised; option structs are listed with their fields.
-    assert any("value" in entry for entry in listed)
-    assert any("fields" in entry for entry in listed)
+    # recognised; option structs are listed with their fields and defaults, which MD
+    # documents nowhere else. Both only come back for a search with a term in it.
+    enum = next(e for e in bridge.api("CLOAPI_ANCHOR_CENTER"))
+    struct = next(e for e in bridge.api("ImportZPRJOption"))
+
+    assert enum["value"].endswith(": 0>"), enum
+    assert struct["fields"]["bAppend"] == "False", struct
 
 
 # ------------------------------------------------------------------------ avatar setup
