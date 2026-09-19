@@ -1,0 +1,46 @@
+# Line endings are load-bearing in this repo on two separate counts, so they are
+# pinned in the working tree on every platform rather than left to core.autocrlf:
+#
+#   1. PROMPT.md and md-mcp/docs/LOOP.md are byte-identical duplicates by design.
+#      Without a rule here, git re-materialises one as CRLF without touching the
+#      other and the contract breaks silently — the files still "look" the same.
+#
+#   2. tests/golden/, evals/corpus/holdout/ and evals/rubrics/ are hash-manifested
+#      (LOOP §9.3), and manifests are verified before AND after every run. A CRLF
+#      round-trip changes a file's SHA-256 without changing its content, which
+#      presents as tampering and fails the iteration for a reason nobody can find.
+#
+# LF everywhere, including the checkout. Not just in the object store.
+
+* text=auto eol=lf
+
+# Hash-manifested and machine-compared files: never let a filter near these.
+*.sha256    text eol=lf
+*.json      text eol=lf
+
+# Interchange formats are text and must round-trip byte-stably.
+*.dxf       text eol=lf
+*.obj       text eol=lf
+
+# Marvelous Designer containers and assets — opaque, never diffed or filtered.
+*.zprj      binary
+*.zpac      binary
+*.pac       binary
+*.zmdr      binary
+*.zfab      binary
+*.avt       binary
+*.arr       binary
+*.pan       binary
+
+# Ordinary binaries.
+*.png       binary
+*.jpg       binary
+*.jpeg      binary
+*.gif       binary
+*.ico       binary
+*.pdf       binary
+*.zip       binary
+*.7z        binary
+*.dll       binary
+*.pyd       binary
+*.so        binary

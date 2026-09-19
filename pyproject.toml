@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "md-mcp"
+version = "0.3.0"
+description = "MCP server exposing a running Marvelous Designer's whole Python API"
+requires-python = ">=3.11"
+dependencies = [
+    # mcp.server.mcpserver (and ToolError) arrived in 2.x; on 1.x this installs
+    # cleanly and then dies with ModuleNotFoundError the first time it is run.
+    "mcp>=2.2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "anyio>=4.0",  # the protocol tests drive the client directly
+]
+
+[project.scripts]
+md-mcp = "md_mcp.server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-m 'not md_required'"
+markers = [
+    "md_required: needs Marvelous Designer open with plugin/md_mcp_listener.py running",
+]

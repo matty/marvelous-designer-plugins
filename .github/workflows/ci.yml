@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: pytest (${{ matrix.os }}, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Marvelous Designer is Windows-only, but md_mcp never imports MD's host
+        # modules and must keep installing where there is no MD -- which is what
+        # ubuntu proves. 3.11 is the interpreter MD embeds (2026.0.315 ships
+        # 3.11.8); 3.14 is what this repo's own venv runs.
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.11", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      # The 33 md_required tests need MD open with the listener running, so they are
+      # deselected by pyproject's addopts and cannot run here. Nothing in CI is
+      # evidence about Marvelous Designer itself.
+      - name: Test
+        run: pytest
+
+  package:
+    name: plugin package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build the plugin package
+        run: python tools/build_plugin.py --out dist
+
+      - name: Rebuild it and check the bytes are the same
+        run: |
+          python tools/build_plugin.py --out dist-again
+          first=$(sha256sum dist/*.zip | cut -d' ' -f1)
+          second=$(sha256sum dist-again/*.zip | cut -d' ' -f1)
+          if [ "$first" != "$second" ]; then
+            echo "::error::two builds of the same commit produced different zips"
+            echo "  $first"
+            echo "  $second"
+            exit 1
+          fi
+          echo "reproducible: \`$first\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: md-mcp-plugin
+          path: dist/*.zip*
+          if-no-files-found: error
