@@ -49,6 +49,7 @@ port. `python tools/build_plugin.py` builds it; a `v*` tag publishes it beside t
 | `md_arrangement_points` | Where arrangement points really are in 3D. **Temporarily adds one pattern piece**, arranges it at each point, and deletes it; reports the before/after piece count |
 | `md_snapshot` | A picture of the 3D window, returned as an image. `view` 0–9 moves the camera (2 front, 8 back, 4 and 6 the sides) and leaves it there; `max_size` caps the long edge, default 1024 px |
 | `md_fabric_presets` | The `.zfab` files `AddFabric` needs, found beside the running MD and in Public and user Documents |
+| `md_seams` | What MD has actually sewn to what: each seam's pieces, spans and line numbers, warnings for an edge sewn twice or to itself, and what changed since an earlier read |
 
 ```
 md_api("Simulate")     -> the simulation calls this build has, with their signatures

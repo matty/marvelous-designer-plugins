@@ -1,0 +1,651 @@
+{
+ "formatVersion": 1,
+ "Unit": "mm",
+ "PatternList": [
+  {
+   "ID": "fk3LDE",
+   "Name": "Cape_Back",
+   "ShapeInfo": {
+    "IsSlashed": false,
+    "LineList": [
+     {
+      "ID": "Ca3xA7",
+      "PointList": [
+       {
+        "ID": "FAwnAH",
+        "PointType": "Straight",
+        "GradingRuleID": 0,
+        "Position": {
+         "x": -823.36957,
+         "y": -76.420898
+        }
+       },
+       {
+        "ID": "KjWDBQ",
+        "PointType": "Polyline",
+        "GradingRuleID": 0,
+        "Position": {
+         "x": -726.19635,
+         "y": -101.85718
+        }
+       },
+       {
+        "ID": "I8hkNL",
+        "PointType": "Polyline",
+        "GradingRuleID": 0,
+        "Position": {
+         "x": -628.61896,
+         "y": -126.30066
+        }
+       },
+       {
+        "ID": "0wnrh5",
+        "PointType": "Polyline",
+        "GradingRuleID": 0,
+        "Position": {
+         "x": -530.82605,
+         "y": -149.7218
+        }
+       },
+       {
+        "ID": "UocVH6",
+        "PointType": "Polyline",
+        "GradingRuleID": 0,
+        "Position": {
+         "x": -432.9982,
+         "y": -172.08716
+        }
+       },
+       {
+        "ID": "Pfd212",
+        "PointType": "Polyline",
+        "GradingRuleID": 0,
+        "Position": {
+         "x": -335.31833,
+         "y": -193.36548
+        }
+       },
+       {
+        "ID": "TguHvY",
+        "PointType": "Polyline",
+        "GradingRuleID": 0,
+        "Position": {
+         "x": -237.96997,
+         "y": -213.52808
+        }
+       },
+       {
+        "ID": "2h4MeV",
+        "PointType": "Polyline",
+        "GradingRuleID": 0,
+        "Position": {
+         "x": -141.13483,
+         "y": -232.55054
+        }
+       },
+       {
+        "ID": "j9Fvq5",
+        "PointType": "Straight",
+        "GradingRuleID": 0,
+        "Position": {
+         "x": -44.999977,
+         "y": -250.3999
+        }
+       }
+      ]
+     },
+     {
+      "ID": "Q52Bgm",
+      "PointList": [
+       {
+        "ID": "j9Fvq5",
+        "PointType": "Straight",
+        "GradingRuleID": 0,
+        "Position": {
+         "x": -44.999977,
+         "y": -250.3999
+        }
+       },
+       {
+        "ID": "6YFxs3",
+        "PointType": "Straight",
+        "GradingRuleID": 0,
+        "Position": {
+         "x": 2.4795532e-05,
+         "y": 793.10132
+        }
+       }
+      ]
+     },
+     {
+      "ID": "rznlHV",
+      "PointList": [
+       {
+        "ID": "6YFxs3",
+        "PointType": "Straight",
+        "GradingRuleID": 0,
+        "Position": {
+         "x": 2.4795532e-05,
+         "y": 793.10132
+        }
+       },
+       {
+        "ID": "RXgV1O",
+        "PointType": "Straight",
+        "GradingRuleID": 0,
+        "Position": {
+         "x": 45.000023,
+         "y": -250.3999
+        }
+       }
+      ]
+     },
+     {
+      "ID": "yGvzUK",
+      "PointList": [
+       {
+        "ID": "RXgV1O",
+        "PointType": "Straight",
+        "GradingRuleID": 0,
+        "Position": {
+         "x": 45.000023,
+         "y": -250.3999
+        }
+       },
+       {
+        "ID": "xgPsJV",
+        "PointType": "Polyline",
+        "GradingRuleID": 0,
+        "Position": {
+         "x": 141.13486,
+         "y": -232.55054
+        }
+       },
+       {
+        "ID": "pxoOLX",
+        "PointType": "Polyline",
+        "GradingRuleID": 0,
+        "Position": {
+         "x": 237.97005,
+         "y": -213.52808
+        }
+       },
+       {
+        "ID": "R9GJYH",
+        "PointType": "Polyline",
+        "GradingRuleID": 0,
+        "Position": {
+         "x": 335.31854,
+         "y": -193.36548
+        }
+       },
+       {
+        "ID": "0H8V4l",
+        "PointType": "Polyline",
+        "GradingRuleID": 0,
+        "Position": {
+         "x": 432.99829,
+         "y": -172.08716
+        }
+       },
+       {
+        "ID": "6tBvKy",
+        "PointType": "Polyline",
+        "GradingRuleID": 0,
+        "Position": {
+         "x": 530.82605,
+         "y": -149.7218
+        }
+       },
+       {
+        "ID": "LA43Ix",
+        "PointType": "Polyline",
+        "GradingRuleID": 0,
+        "Position": {
+         "x": 628.61902,
+         "y": -126.30066
+        }
+       },
+       {
+        "ID": "SZzwvx",
+        "PointType": "Polyline",
+        "GradingRuleID": 0,
+        "Position": {
+         "x": 726.19629,
+         "y": -101.8573
+        }
+       },
+       {
+        "ID": "iK4hVs",
+        "PointType": "Straight",
+        "GradingRuleID": 0,
+        "Position": {
+         "x": 823.36957,
+         "y": -76.420898
+        }
+       }
+      ]
+     },
+     {
+      "ID": "kuJGPV",
+      "PointList": [
+       {
+        "ID": "iK4hVs",
+        "PointType": "Straight",
+        "GradingRuleID": 0,
+        "Position": {
+         "x": 823.36957,
+         "y": -76.420898
+        }
+       },
+       {
+        "ID": "4ElGsO",
+        "PointType": "Straight",
+        "GradingRuleID": 0,
+        "Position": {
+         "x": 280.00003,
+         "y": 1148.1013
+        }
+       }
+      ]
+     },
+     {
+      "ID": "skMM00",
+      "PointList": [
+       {
+        "ID": "4ElGsO",
+        "PointType": "Straight",
+        "GradingRuleID": 0,
+        "Position": {
+         "x": 280.00003,
+         "y": 1148.1013
+        }
+       },
+       {
+        "ID": "G57zY4",
+        "PointType": "Straight",
+        "GradingRuleID": 0,
+        "Position": {
+         "x": 125.00002,
+         "y": 1188.1013
+        }
+       }
+      ]
+     },
+     {
+      "ID": "4HB1mK",
+      "PointList": [
+       {
+        "ID": "G57zY4",
+        "PointType": "Straight",
+        "GradingRuleID": 0,
+        "Position": {
+         "x": 125.00002,
+         "y": 1188.1013
+        }
+       },
+       {
+        "ID": "eZyQOR",
+        "PointType": "Polyline",
+        "GradingRuleID": 0,
+        "Position": {
+         "x": 108.2532,
+         "y": 1184.3513
+        }
+       },
+       {
+        "ID": "QcnZjX",
+        "PointType": "Polyline",
+        "GradingRuleID": 0,
+        "Position": {
+         "x": 62.500023,
+         "y": 1176.8513
+        }
+       },
+       {
+        "ID": "QTPmcT",
+        "PointType": "Polyline",
+        "GradingRuleID": 0,
+        "Position": {
+         "x": 2.4795532e-05,
+         "y": 1173.1013
+        }
+       },
+       {
+        "ID": "sBbZNy",
+        "PointType": "Polyline",
+        "GradingRuleID": 0,
+        "Position": {
+         "x": -62.499977,
+         "y": 1176.8513
+        }
+       },
+       {
+        "ID": "KMEHpy",
+        "PointType": "Polyline",
+        "GradingRuleID": 0,
+        "Position": {
+         "x": -108.25315,
+         "y": 1184.3513
+        }
+       },
+       {
+        "ID": "9x3iNq",
+        "PointType": "Straight",
+        "GradingRuleID": 0,
+        "Position": {
+         "x": -124.99998,
+         "y": 1188.1013
+        }
+       }
+      ]
+     },
+     {
+      "ID": "rZK7E8",
+      "PointList": [
+       {
+        "ID": "9x3iNq",
+        "PointType": "Straight",
+        "GradingRuleID": 0,
+        "Position": {
+         "x": -124.99998,
+         "y": 1188.1013
+        }
+       },
+       {
+        "ID": "F98a4E",
+        "PointType": "Straight",
+        "GradingRuleID": 0,
+        "Position": {
+         "x": -279.99997,
+         "y": 1148.1013
+        }
+       }
+      ]
+     },
+     {
+      "ID": "K3WbWg",
+      "PointList": [
+       {
+        "ID": "F98a4E",
+        "PointType": "Straight",
+        "GradingRuleID": 0,
+        "Position": {
+         "x": -279.99997,
+         "y": 1148.1013
+        }
+       },
+       {
+        "ID": "FAwnAH",
+        "PointType": "Straight",
+        "GradingRuleID": 0,
+        "Position": {
+         "x": -823.36957,
+         "y": -76.420898
+        }
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "ID": "CM7kcV",
+   "Name": "Cape_Front_L",
+   "ShapeInfo": {
+    "IsSlashed": false,
+    "LineList": [
+     {
+      "ID": "bNiMHB",
+      "PointList": [
+       {
+        "ID": "rWrkpS",
+        "PointType": "Straight",
+        "GradingRuleID": 0,
+        "Position": {
+         "x": 1107.0759,
+         "y": 39.438965
+        }
+       },
+       {
+        "ID": "OWg3LC",
+        "PointType": "Polyline",
+        "GradingRuleID": 0,
+        "Position": {
+         "x": 1225.8983,
+         "y": 56.332153
+        }
+       },
+       {
+        "ID": "t0B1iM",
+        "PointType": "Polyline",
+        "GradingRuleID": 0,
+        "Position": {
+         "x": 1345.4836,
+         "y": 74.777466
+        }
+       },
+       {
+        "ID": "haobF6",
+        "PointType": "Polyline",
+        "GradingRuleID": 0,
+        "Position": {
+         "x": 1465.5383,
+         "y": 94.741455
+        }
+       },
+       {
+        "ID": "TD7bu0",
+        "PointType": "Polyline",
+        "GradingRuleID": 0,
+        "Position": {
+         "x": 1585.7761,
+         "y": 116.19556
+        }
+       },
+       {
+        "ID": "kySA8i",
+        "PointType": "Polyline",
+        "GradingRuleID": 0,
+        "Position": {
+         "x": 1705.9116,
+         "y": 139.1062
+        }
+       },
+       {
+        "ID": "FYVXpN",
+        "PointType": "Straight",
+        "GradingRuleID": 0,
+        "Position": {
+         "x": 1825.6516,
+         "y": 163.44275
+        }
+       }
+      ]
+     },
+     {
+      "ID": "FPf6uC",
+      "PointList": [
+       {
+        "ID": "FYVXpN",
+        "PointType": "Straight",
+        "GradingRuleID": 0,
+        "Position": {
+         "x": 1825.6516,
+         "y": 163.44275
+        }
+       },
+       {
+        "ID": "xOB5fl",
+        "PointType": "Straight",
+        "GradingRuleID": 0,
+        "Position": {
+         "x": 1377.0759,
+         "y": 1424.439
+        }
+       }
+      ]
+     },
+     {
+      "ID": "yoh20n",
+      "PointList": [
+       {
+        "ID": "xOB5fl",
+        "PointType": "Straight",
+        "GradingRuleID": 0,
+        "Position": {
+         "x": 1377.0759,
+         "y": 1424.439
+        }
+       },
+       {
+        "ID": "ZMgs5z",
+        "PointType": "Straight",
+        "GradingRuleID": 0,
+        "Position": {
+         "x": 1222.0759,
+         "y": 1464.439
+        }
+       }
+      ]
+     },
+     {
+      "ID": "LeSqr0",
+      "PointList": [
+       {
+        "ID": "ZMgs5z",
+        "PointType": "Straight",
+        "GradingRuleID": 0,
+        "Position": {
+         "x": 1222.0759,
+         "y": 1464.439
+        }
+       },
+       {
+        "ID": "XplJqg",
+        "PointType": "Polyline",
+        "GradingRuleID": 0,
+        "Position": {
+         "x": 1216.4474,
+         "y": 1447.443
+        }
+       },
+       {
+        "ID": "G9BEpr",
+        "PointType": "Polyline",
+        "GradingRuleID": 0,
+        "Position": {
+         "x": 1200.1128,
+         "y": 1432.1108
+        }
+       },
+       {
+        "ID": "FXUYgL",
+        "PointType": "Polyline",
+        "GradingRuleID": 0,
+        "Position": {
+         "x": 1174.6711,
+         "y": 1419.943
+        }
+       },
+       {
+        "ID": "MhONJQ",
+        "PointType": "Polyline",
+        "GradingRuleID": 0,
+        "Position": {
+         "x": 1142.6128,
+         "y": 1412.1309
+        }
+       },
+       {
+        "ID": "IHtCJt",
+        "PointType": "Straight",
+        "GradingRuleID": 0,
+        "Position": {
+         "x": 1107.0759,
+         "y": 1409.439
+        }
+       }
+      ]
+     },
+     {
+      "ID": "Q3eirc",
+      "PointList": [
+       {
+        "ID": "IHtCJt",
+        "PointType": "Straight",
+        "GradingRuleID": 0,
+        "Position": {
+         "x": 1107.0759,
+         "y": 1409.439
+        }
+       },
+       {
+        "ID": "DFBC9z",
+        "PointType": "Straight",
+        "GradingRuleID": 0,
+        "Position": {
+         "x": 1107.0759,
+         "y": 1349.439
+        }
+       }
+      ]
+     },
+     {
+      "ID": "p4M94d",
+      "PointList": [
+       {
+        "ID": "DFBC9z",
+        "PointType": "Straight",
+        "GradingRuleID": 0,
+        "Position": {
+         "x": 1107.0759,
+         "y": 1349.439
+        }
+       },
+       {
+        "ID": "rWrkpS",
+        "PointType": "Straight",
+        "GradingRuleID": 0,
+        "Position": {
+         "x": 1107.0759,
+         "y": 39.438965
+        }
+       }
+      ]
+     }
+    ]
+   }
+  }
+ ],
+ "SeamLinePairGroupList": [
+  {
+   "Name": "Sewing_83371",
+   "bIsTurned": false,
+   "FoldData": {
+    "iAngle": 180,
+    "iStrength": 5
+   },
+   "PairList": [
+    {
+     "First": {
+      "ShapeID": "fk3LDE",
+      "LengthParam": {
+       "fStart": 0.78378677,
+       "fEnd": 0.80686474
+      },
+      "Direction": true
+     },
+     "Second": {
+      "ShapeID": "CM7kcV",
+      "LengthParam": {
+       "fStart": 0.59641224,
+       "fEnd": 0.55355781
+      },
+      "Direction": false
+     }
+    }
+   ]
+  }
+ ]
+}

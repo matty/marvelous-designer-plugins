@@ -12,6 +12,8 @@ what ``tests/md_required/test_bridge_live.py`` is for.
 from __future__ import annotations
 
 import contextlib
+import json
+import math
 import os
 import pathlib
 import socket
@@ -67,6 +69,9 @@ class FakeMDHost:
         self.piece_names: list[str] = []
         self.shape_counts: list[int] = []
         self.seam_groups = 0
+        #: Seams sewn with AddSeamlinePairGroup's six arguments, which the pattern JSON
+        #: export writes out -- (piece A, line A, piece B, line B, flag A, flag B).
+        self.seams: list[tuple] = []
         self.avatars: list[str] = []
         self.fabrics: list[str] = ["FABRIC 1"]
         #: (name, path) for every RegisterPythonScript call. MD's own list cannot be
@@ -141,9 +146,55 @@ class FakeMDHost:
         self.placements[piece] = self.arrangement_points[point][1]
         return True
 
+    def _line_lengths(self, index: int) -> list[float]:
+        points = self.piece_points[index]
+        return [
+            math.dist(points[k][:2], points[(k + 1) % len(points)][:2])
+            for k in range(len(points))
+        ]
+
+    def GetLineLength(self, index: int, line: int) -> float:
+        return self._line_lengths(index)[line]
+
     def ExportPatternJSON(self, path: str) -> None:
+        """A pattern document in MD's shape (see tests/fixtures/cape_back_and_front.json).
+
+        Each piece's outline is one line per edge, sharing end points; each recorded
+        seam is a pair of spans as fractions of the outline's length, backwards on a
+        side whose direction flag is False -- as MD's own export was measured.
+        """
         self.calls.append(("ExportPatternJSON", path))
-        self._write(path, b"{}")
+        patterns = []
+        for index, points in enumerate(self.piece_points):
+            lines = [
+                {"ID": f"L{index}-{k}", "PointList": [
+                    {"ID": f"P{index}-{k}-{e}", "PointType": "Straight",
+                     "Position": {"x": point[0], "y": point[1]}}
+                    for e, point in enumerate((points[k], points[(k + 1) % len(points)]))
+                ]}
+                for k in range(len(points))
+            ]
+            patterns.append({"ID": f"S{index}", "Name": self.piece_names[index],
+                             "ShapeInfo": {"IsSlashed": False, "LineList": lines}})
+
+        def side(piece: int, line: int, forward: bool) -> dict:
+            lengths = self._line_lengths(piece)
+            total = sum(lengths)
+            start, end = sum(lengths[:line]) / total, sum(lengths[: line + 1]) / total
+            if not forward:
+                start, end = end, start
+            return {"ShapeID": f"S{piece}", "LengthParam": {"fStart": start, "fEnd": end},
+                    "Direction": forward}
+
+        groups = [
+            {"Name": f"Sewing_{n}", "bIsTurned": False,
+             "FoldData": {"iAngle": 180, "iStrength": 5},
+             "PairList": [{"First": side(a, la, da), "Second": side(b, lb, db)}]}
+            for n, (a, la, b, lb, da, db) in enumerate(self.seams)
+        ]
+        document = {"formatVersion": "fake", "Unit": "mm", "PatternList": patterns,
+                    "SeamLinePairGroupList": groups}
+        self._write(path, json.dumps(document).encode("utf-8"))
 
     def ExportObjectBrowserMaterialsList(self) -> str:
         return "Fabrics\n1:FABRIC 1\nTrims\n1:Default Button\n"
@@ -242,11 +293,14 @@ class FakeMDHost:
 
     def AddSeamlinePairGroup(self, *args) -> bool:
         self.calls.append(("AddSeamlinePairGroup", *args))
-        self.seam_groups += 1
+        if len(args) == 6:
+            self.seams.append(tuple(args))
+        else:
+            self.seam_groups += 1
         return True
 
     def GetSeamlinePairGroupCount(self) -> int:
-        return self.seam_groups
+        return self.seam_groups + len(self.seams)
 
     def GetPatternCount(self) -> int:
         return len(self.piece_names)
@@ -288,6 +342,7 @@ class FakeMDHost:
         self.piece_points.clear()
         self.placements.clear()
         self.seam_groups = 0
+        self.seams.clear()
         self.avatars.clear()
 
     def modules(self) -> dict[str, types.ModuleType]:
@@ -300,6 +355,7 @@ class FakeMDHost:
             "GetPatternCount",
             "GetPatternPieceName",
             "GetSeamlinePairGroupCount",
+            "GetLineLength",
             "DeletePatternPiece",
             "GetArrangementList",
             "SetArrangement",

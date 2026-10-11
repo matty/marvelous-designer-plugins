@@ -27,6 +27,7 @@ TOOLS = [
     "md_arrangement_points",
     "md_snapshot",
     "md_fabric_presets",
+    "md_seams",
 ]
 
 
@@ -264,3 +265,10 @@ def test_a_nonsense_deadline_is_refused_rather_than_passed_to_a_socket(server) -
     result = call(server, "run_md_python", {"source": "print(1)", "timeout_seconds": 0})
     assert result.is_error
     assert "greater than 0" in str(result.content[0].text)
+
+
+def test_the_instructions_fit_inside_claude_codes_cut_off() -> None:
+    # Claude Code truncates a server's instructions at 2,048 characters, silently:
+    # anything past the cut never reaches the model. Guidance that will not fit belongs
+    # in a tool description or a document, not here.
+    assert len(build_server().instructions) <= 2048

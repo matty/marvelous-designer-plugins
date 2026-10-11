@@ -31,8 +31,10 @@ cheap way to look at the result. The background is in the
 2. **`md_checkpoint` / `md_restore`.** `ExportZPrj` into a checkpoint folder, and
    `ImportZprj` back (the round trip is measured). First check that `ExportZPrj` does not
    re-point MD's open project, or the user's next Save would overwrite the checkpoint.
-3. **`md_seams`.** What is sewn to what: decode `ExportPatternJSON`'s seam list into piece
-   names, lines and lengths, so a wrong or unplanned seam shows up straight away.
+3. ~~**`md_seams`.**~~ Built: decodes `ExportPatternJSON`'s seam list into piece names,
+   spans, line numbers and lengths, warns on an edge sewn twice or to itself, and diffs
+   against an earlier read. Tested against a real export; the live test is written and
+   waits for the next MD session.
 4. **Dialog warning.** After a mutating reply, md-mcp lists MD's windows; if a dialog is
    showing, the reply says so instead of success.
 5. **`md_snapshot` sheet.** Front, side and back in one image by default.

@@ -1070,6 +1070,62 @@ print(json.dumps({
 '''
 
 
+#: md_seams, inside MD. ExportPatternJSON is the only place MD says which edges a seam
+#: joins; the document goes to a temporary folder and only what the ledger needs comes
+#: back -- each piece's id, name, index and line lengths (MD's own GetLineLength, and the
+#: document's geometry as a cross-check on line order), and the seam groups as MD wrote
+#: them. Decoding happens in md_mcp.seams, where it can be tested without MD.
+_SEAMS = r'''
+import json, math, os, shutil, tempfile
+import pattern_api
+_folder = tempfile.mkdtemp(prefix="md-mcp-seams-")
+try:
+    _path = os.path.join(_folder, "pattern.json")
+    pattern_api.ExportPatternJSON(_path)
+    if not os.path.isfile(_path):
+        raise RuntimeError("ExportPatternJSON wrote no file at {}".format(_path))
+    with open(_path, encoding="utf-8") as _handle:
+        _document = json.load(_handle)
+    _count = pattern_api.GetPatternCount()
+    _names = [pattern_api.GetPatternPieceName(_i) for _i in range(_count)]
+    _pieces = []
+    for _order, _piece in enumerate(_document.get("PatternList", [])):
+        _lines = (_piece.get("ShapeInfo") or {}).get("LineList") or []
+        _polyline = []
+        for _line in _lines:
+            _points = [(_p["Position"]["x"], _p["Position"]["y"])
+                       for _p in _line.get("PointList", [])]
+            _polyline.append(sum(math.hypot(_b[0] - _a[0], _b[1] - _a[1])
+                                 for _a, _b in zip(_points, _points[1:])))
+        _name = _piece.get("Name")
+        # The document lists pieces in MD's order; the name confirms it, and a name
+        # that occurs once settles it if the order ever differs.
+        if _order < _count and _names[_order] == _name:
+            _index = _order
+        elif _names.count(_name) == 1:
+            _index = _names.index(_name)
+        else:
+            _index = None
+        _measured = None
+        if _index is not None:
+            try:
+                _measured = [float(pattern_api.GetLineLength(_index, _j))
+                             for _j in range(len(_lines))]
+            except Exception:
+                _measured = None
+        _pieces.append({"id": _piece.get("ID"), "name": _name, "index": _index,
+                        "line_lengths": _measured, "polyline_lengths": _polyline})
+    _result = {"pieces": _pieces,
+               "groups": _document.get("SeamLinePairGroupList", []),
+               "seam_group_count": pattern_api.GetSeamlinePairGroupCount()}
+except Exception as _exc:
+    _result = {"error": "{}: {}".format(type(_exc).__name__, _exc)}
+finally:
+    shutil.rmtree(_folder, ignore_errors=True)
+print(json.dumps(_result))
+'''
+
+
 def _decode_printed(output: str) -> Any:
     """The JSON document a snippet printed -- its last line if something printed first."""
     try:
@@ -1150,6 +1206,14 @@ def snapshot(view: int | None = None) -> tuple[bytes, dict]:
     if not encoded:
         raise BridgeError(f"MD's snapshot came back without an image: {shot!r}")
     return base64.b64decode(encoded), shot
+
+
+def seams() -> dict:
+    """The pieces, line lengths and seam groups ``md_mcp.seams.ledger`` decodes."""
+    raw, _ = _run_snippet(_SEAMS, {}, "<md-mcp seams>")
+    if raw.get("error"):
+        raise BridgeError(f"Reading the seams out of MD failed: {raw['error']}")
+    return raw
 
 
 def fabric_presets(search: str = "") -> dict:

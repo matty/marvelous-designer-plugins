@@ -33,7 +33,7 @@ from typing import Any
 from mcp.server.mcpserver import Image, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
-from md_mcp import __version__, bridge
+from md_mcp import __version__, bridge, seams
 
 
 def _reportable(fn: Callable) -> Callable:
@@ -305,16 +305,13 @@ def build_server() -> MCPServer:
             "for any n, so Simulate(1) leaves the garment flat -- it needs a few "
             "hundred, and repeated calls continue from where the last left off. A "
             "sewing call naming a missing line or piece returns False; valid indices "
-            "can still pair the wrong edges, so check seam_group_count and the scene. "
-            "And when a surface will not take a fabric, check it is a pattern piece "
-            "before blaming the binding: measured 2026-09-19, setting all four fabrics "
-            "to probe colours and then every one of 56 pieces to a single fabric left "
-            "some strap-shaped geometry unchanged, because it was not a pattern piece "
-            "at all. Recolour the fabric and look; the reported index is not evidence "
-            "either way. Before sewing, check a ledger of existing and planned "
-            "edge pairs: avoid duplicate pairs, self-sewing and unintended reuse of "
-            "edge intervals. Verify lengths, intended ease and endpoint direction; "
-            "counts alone cannot prove correct seams or absence of 3D intersections.\n"
+            "can still pair the wrong edges, and Layer Clone sews every edge on its "
+            "own. So read seams back with md_seams after sewing: it names the lines "
+            "each seam joins and warns on an edge sewn twice or to itself. Plan pairs "
+            "before sewing; verify lengths, ease and direction; counts alone prove "
+            "nothing. When a surface will not take a fabric, check it is a pattern "
+            "piece: measured 2026-09-19, strap-shaped geometry that was not one "
+            "ignored every fabric change.\n"
             "The call API cannot see the result in 3D, so four tools read it back: "
             "md_measure (avatar and garment bounds, avatar slices at given heights), "
             "md_arrangement_points (where arrangement points really are -- their names "
@@ -631,6 +628,58 @@ def build_server() -> MCPServer:
         fabric_api.AddFabric.
         """
         return bridge.fabric_presets(search)
+
+    # The last few ledgers md_seams read, by fingerprint, so a later call can say what
+    # changed since one of them. In this process only: a restarted server starts empty.
+    ledgers: dict[str, dict] = {}
+
+    @server.tool()
+    @_reportable
+    def md_seams(since: str = "", max_groups: int = 200) -> dict:
+        """What MD has actually sewn to what: the seam ledger, read out of MD.
+
+        MD's API only counts seam groups. This exports the pattern JSON inside MD and
+        decodes every seam into its two sides: the piece, the span along its outline in
+        mm, the outline lines that span covers (MD's line numbers, as
+        AddSeamlinePairGroup takes them), the direction, and whether the span runs
+        backwards. Read it after every sewing step: a sewing call accepts valid indices
+        that join the wrong edges, and some MD operations sew on their own -- Layer
+        Clone sews every edge of the clone to its original.
+
+        since: a fingerprint from an earlier md_seams reply. The reply then lists the
+            seams added and removed since that read -- which is how a seam nobody
+            planned shows up. Only the last 20 ledgers this server read are kept.
+        max_groups: how many groups to list (default 200); the rest are counted.
+
+        Returns fingerprint, group_count, groups: [{index, name, turned, fold: {angle,
+        strength}, pairs: [{a, b, length_mm}]}], and warnings by kind: "self" (an edge
+        sewn to an overlapping part of itself), "reused" (one stretch of edge in two
+        seams -- a lining sewn to its shell at the shoulder shows up here), "length" (two
+        sides differing by more than 5 mm), "unknown_piece", "count" (MD's count and
+        the export disagree) and "line_order" (MD's line lengths disagree with the
+        document, so line numbers may be off). The scene is not changed.
+        """
+        if max_groups < 0:
+            raise ValueError(f"max_groups cannot be negative, not {max_groups!r}")
+        full = seams.ledger(bridge.seams(), max_groups=10**9)
+        result = dict(full)
+        result["groups"] = full["groups"][:max_groups]
+        if len(full["groups"]) > max_groups:
+            result["groups_omitted"] = len(full["groups"]) - max_groups
+        if since:
+            before = ledgers.get(since)
+            if before is None:
+                result["since"] = (
+                    f"no ledger with fingerprint {since!r} was read by this server -- "
+                    "only the last 20 are kept, and none survive a restart"
+                )
+            else:
+                result.update(seams.diff(before, full))
+        ledgers.pop(full["fingerprint"], None)
+        ledgers[full["fingerprint"]] = full
+        while len(ledgers) > 20:
+            ledgers.pop(next(iter(ledgers)))
+        return result
 
     return server
 

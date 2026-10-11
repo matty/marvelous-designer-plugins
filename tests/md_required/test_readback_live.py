@@ -159,3 +159,42 @@ def test_an_export_into_a_missing_folder_is_created_and_checked(md_live, tmp_pat
     assert records[0].get("created_folders") == [str(target.parent)]
     assert not records[0].get("missing_outputs"), records[0]
     assert target.is_file()
+
+
+# ------------------------------------------------------------------------- md_seams
+
+
+PANELS = """
+import pattern_api
+for name, x in (("front", -180.0), ("back", 220.0)):
+    index = pattern_api.CreatePatternWithPoints(
+        [(x, 0.0, 0), (x + 360.0, 0.0, 0), (x + 360.0, 500.0, 0), (x, 500.0, 0)])
+    pattern_api.SetPatternPieceName(index, name)
+"""
+
+
+def test_seams_reads_back_which_lines_were_joined(empty) -> None:
+    # The same pair as test_garment_live's side seams: front's right edge (line 1) to
+    # back's left (line 3), and the other way round.
+    bridge.run_script(PANELS, name="panels.py")
+    bridge.call("pattern_api.AddSeamlinePairGroup", [0, 1, 1, 3, True, False])
+    bridge.call("pattern_api.AddSeamlinePairGroup", [0, 3, 1, 1, True, False])
+
+    from md_mcp import seams
+
+    ledger = seams.ledger(bridge.seams())
+
+    joined = sorted(
+        ((pair["a"]["piece"], tuple(pair["a"]["lines"])),
+         (pair["b"]["piece"], tuple(pair["b"]["lines"])))
+        for group in ledger["groups"] for pair in group["pairs"]
+    )
+    assert ledger["group_count"] == 2
+    assert joined == sorted([
+        (("front", (1,)), ("back", (3,))),
+        (("front", (3,)), ("back", (1,))),
+    ]), ledger
+    assert all(length == 500.0 for group in ledger["groups"]
+               for pair in group["pairs"] for length in pair["length_mm"])
+    # Nothing here is sewn twice or to itself, and MD's lengths match the document's.
+    assert ledger["warnings"] == {}, ledger["warnings"]
