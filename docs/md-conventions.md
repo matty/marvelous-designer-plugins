@@ -2,7 +2,8 @@
 
 Measured against **MD 2026.0.315** (Enterprise Network Offline) unless a line says
 otherwise. Everything here was learned by building scenes in MD and reading them back.
-None of it is guesswork, and none of it is a plan.
+Measurements below apply to the tested cases, not every topology, pose or MD build.
+For recommended construction checks, read [garment-preflight.md](garment-preflight.md).
 
 Where a measurement contradicts MD's published documentation, the measurement wins and
 the contradiction is noted. `md_api` reads the running build rather than any captured
@@ -22,7 +23,13 @@ ignores it: a 300 mm square created with the UI in centimetres reads back `300.0
 In 2D pattern space `x` is right and `y` is **up**, and coordinates come back exactly as
 sent. The origin is the 2D pattern window's origin; coordinates given to
 `CreatePatternWithPoints` are absolute in that world, and `SetPatternPiecePos` moves a
-piece within it.
+piece within it. **`GetPatternPiecePos` answers the centre of the piece's 2D bounding
+box**, not the point it was drawn from: `[100, 50]` for a 200 × 100 rectangle drawn from
+the origin (2026-10-11, 2026.0.315).
+
+**In 3D it is millimetres again, `y` up, and `+z` is the avatar's front** — read from an
+`ExportOBJ` of an avatar on 2026-10-11. Arranging a piece maps its 2D `+y` to 3D up: a
+piece drafted with its tip at `y = 600` came out tip uppermost.
 
 **Winding is not enforced.** Clockwise and counter-clockwise are both accepted, with
 areas agreeing to four significant figures.
@@ -58,7 +65,7 @@ commonly open (a fold line, a dart leg guide).
 
 ### Splines run longer than the chords through them
 
-MD interpolates close to the true arc, so a sampled curve always measures **long**
+MD interpolates close to the true arc, so the sampled curves in this probe measured **long**
 against the straight lines between its own points, and how much depends on density:
 
 | Interior spline points | MD over the chords |
@@ -71,12 +78,36 @@ against the straight lines between its own points, and how much depends on densi
 
 Against the *true* arc MD is within 0.07 % from four interior points on. So MD measures
 the curve, and anything comparing chord sums is measuring something else. Four interior
-points is the floor for a curve that has to match a seam; below that the spline does not
-recover the intended shape either.
+points recovered this probe's shape adequately. Other curves need their own length
+and shape checks; this is not a universal minimum.
 
 A chord-length-parameterized natural cubic spline reproduces MD's recorded lengths to
 better than 0.01 mm across these densities, if you need to predict a length before
 building.
+
+### Moving a point
+
+**`pattern_api.MovePatternPoint(piece, point, x, y)` is an absolute move.** It puts the
+point *at* `(x, y)`: on a rectangle `(0,0), (300,0), (300,200), (0,200)`,
+`MovePatternPoint(piece, 1, 50, 0)` took point 1 from `(300, 0)` to `(50, 0)`. On a point
+sitting at the origin it looks relative — `(0, -100)` sent to a point at `(0, 0)` reads as
+a delta — which is how it was first misread. Measured 2026-10-11, 2026.0.315.
+
+`point` counts **straight points only**: the ones `GetPatternInputInformation`'s
+`PointList` reports, which is the same numbering lines use (below).
+
+**A move that would leave the outline degenerate is refused without a word.** Point 2 of
+that rectangle sent to `(0, 100)`, on the edge between points 3 and 0, and point 1 of
+another piece sent to `(0, -100)`, on top of a point 0 just moved there, both returned
+`None` and left the piece exactly as it was. A refusal and a move look the same from Python, so read the
+outline back after every move.
+
+**Moving a straight point carries the interior of an adjacent curved line with it**, with
+a linear falloff along the line. A corner moved from `(0, 0)` to `(0, -100)`, at one end
+of a curved line running to `(400, 0)`, took the curve points `(100, -30)`, `(200, -40)`,
+`(300, -30)` to `(100, -104.5)`, `(200, -90)`, `(300, -55.5)` — shifts of 74.5, 50 and
+25.5 mm. Measured from the new chord the bulge is `-29.5`, `-40`, `-30.5`, against `-30`,
+`-40`, `-30` before: the curve is carried along, not bent at the corner.
 
 ---
 
@@ -106,7 +137,7 @@ any call**. You have to derive it.
 them. The number of addressable lines equals the number of type-`0` points, so an
 armscye sampled at eight points is **one** line, not seven. For an all-straight contour
 this reduces to the obvious reading: line `i` runs from point `i` to `i+1`, with the last
-closing back to point `0`. Two consequences:
+closing back to point `0` (measured again 2026-10-11). Two consequences:
 
 - Any point that must be sewn to two *different* counterparts has to be a straight point.
   A sleeve's cap point is the example: smooth it and the whole cap becomes one line, so
@@ -149,10 +180,10 @@ they do. Nothing times out at MD's end, so a bridge call that never returns is w
 piece. That is more than `GetSeamlinePairGroupCount()` gives, and it is the closest thing
 to checking a seam rather than trusting it:
 
-* **A piece with an empty list is sewn to nothing.** On a finished garment that is a
-  defect the count alone cannot show — the total goes up whether or not the piece it was
+* **A piece with an empty list is sewn to nothing.** For a piece intended to be
+  attached, this is a review flag the count alone cannot show — the total goes up whether or not the piece it was
   meant for was involved.
-* **Mirrored pieces should have equal counts.** Comparing every `*_L` against its `*_R`
+* **Intentionally symmetric constructions should have equal counts.** Comparing every `*_L` against its `*_R`
   turns an asymmetric build into one number that disagrees.
 
 Measured 2026-09-19 on a 56-piece garment (2026.0.315): 133 groups reported, 133 distinct
@@ -170,7 +201,8 @@ false : backward", meaning *along increasing point index* on that line's contour
 edges sewn with the same flag join start-to-start; opposite flags join start-to-end.
 
 Two counter-clockwise pieces meeting face to face traverse their shared seam in opposite
-directions, so the pair is `(True, False)`.
+directions, so the pair in this measured setup is `(True, False)`. Derive the correspondence
+again for flipped or imported contours; this is not a universal default.
 
 **Measured, because nothing else settles it.** Both pairs are *accepted*, and cloth with
 nothing to hang on falls in a heap whichever way it is sewn. Sewn around an avatar's limb
@@ -273,13 +305,38 @@ Enterprise Network Offline ships no Library assets, but it does ship avatars und
 Placement against a body is `SetArrangement(_patternIndex, _arrangementIndex)`, naming a
 point from `GetArrangementList()`.
 
-**`SetArrangementPosition` does nothing.** Swept over five values with an avatar loaded,
-every exported vertex was identical, while `SetArrangementOrientation` on the same piece
-moved it 342 mm. The readback echoes the integer back, which is why it looks as though it
-worked.
+**`SetArrangementPosition(piece, x, y, offset)` works, but only once the piece is
+re-placed.** The three values are the GUI's arrangement Position X, Position Y and
+Offset, each 0–100; they land in `GetArrangementOfPattern`'s `ArrangementOffsetX/Y/Z`,
+and 150 is refused with the old value kept. On their own they move nothing — which is
+why an earlier sweep here read every vertex unchanged and called the call a no-op. They
+take effect when the piece is re-placed: `SetArrangementOrientation(piece, <its current
+orientation>)` re-places that piece alone, `SetArrangementShapeStyle` with its current
+style does the same, and `ResetClothArrangement()` re-places **every** piece, drape and
+all. `SetArrangement` afterwards puts the point's defaults back. Measured 2026-10-11 on
+2026.0.315 with `Nardo`, a 200 × 140 mm probe, centre of its exported bounding box (mm):
+
+| Point | Values | Centre `x, y, z` | Moved |
+| --- | --- | --- | --- |
+| `Neck_Back` | defaults 50, 50, 50 | 0.6, 1605.4, −146.7 | — |
+| `Neck_Back` | x 0 (and x 100) | 0.6, 1491.0, 132.9 | round to the front of the neck |
+| `Neck_Back` | y 0 / y 100 | y 1591.5 / 1619.3 | 28 mm along the neck |
+| `Neck_Back` | offset 0 / offset 100 | z −38.2 / −245.0 | 207 mm out from it |
+| `Shoulder_L` | defaults 45, 50, 50 | 195.0, 1492.9, −8.4 | — |
+| `Shoulder_L` | y 0 / y 100 | z 69.1 / −85.9 | 155 mm front to back |
+| `Shoulder_L` | offset 0 / offset 100 | y 1386.1 / 1595.2 | 209 mm |
+
+So `x` runs round the bounding volume, `y` along it, and the offset is distance from it
+— about 2 mm a unit on this avatar. The units are the volume's, not millimetres, so read
+where the piece landed rather than predicting it.
 
 `SetArrangementOrientation`'s `_orientation` is **degrees**, and the default is 180, not
 0. `SetArrangementShapeStyle` accepts only `"Flat"` and `"Curved"`.
+
+**Arranging puts the centre of the piece's 2D bounding box on the point**, with 2D `+y`
+up — the same centre `GetPatternPiecePos` reports. A 600 mm tall piece on
+`Body_Back_Center_1` spanned `y` 1145–1745 (2026-10-11, 2026.0.315). So a long piece
+reaches as far above its point as below it.
 
 **`GetArrangementList()` can be empty, and then there is nowhere to arrange to.** The
 shipped `Genesis8_Female.avt` loads with no arrangement points, and
@@ -295,6 +352,77 @@ rather than draping on the body.
 The `Nardo` avatar imported from `.obj` reported 109 named points (`Arm_Back_1_L`,
 each with offsets, orientation and a `Curved`/`Flat` type) on 2026-09-19, 2026.0.315.
 Read `GetArrangementList()` rather than assuming either way.
+
+### A point's name is not its position
+
+Arrangement points sit on bounding volumes sized by the **whole** avatar, so on an avatar
+with a long tail the body points are nowhere near the body. Measured 2026-10-11 on
+2026.0.315 with `Nardo`, 2019 mm tall including ears, whose tail reaches `z = -994`
+behind: a 200 × 140 mm piece arranged on each point in turn, its 3D bounding box read
+from an `ExportOBJ` (mm).
+
+| Point | Where the piece landed | For comparison |
+|---|---|---|
+| `Body_Back_Center_1`/`2`/`3` | z -1126..-1176 | back surface z ≈ -116 |
+| `Body_Back_1_L`/`_R` | z -799..-992 | |
+| `Body_Front_Center_1`/`2` | z 386..436 | chest surface z ≈ +146 |
+| `Body_Front_1_L` | x 155..207, z 57..250 | |
+| `Neck_Back` | y 1535–1676, z -114..-179 | |
+| `Neck_Collar` | z -157..-216 | |
+| `Neck_Front` | y 1426–1556, z 93..173 | |
+| `Neck_L` | x 131..161 | intersects the shoulder |
+| `Shoulder_L` | x 101..289, y 1469–1517, z -78..62 | lies over the top of the shoulder |
+| `Head` | z -524..-549 | |
+
+The back-centre points are a metre behind the back and the front-centre points 240 mm
+proud of the chest, while the neck and shoulder points sit close to, or in, the body.
+**Never
+infer an arrangement point's position from its name** — resolve the point's world
+position first, and after arranging, read where the piece actually landed.
+
+### Nothing reports an avatar's size
+
+**Nothing found in the six modules reports an avatar's dimensions or a piece's 3D
+bounds.** `utility_api.GetClothPositions(List[float]) -> None` looks like the reader and
+cannot be one: its C++ side fills a `std::vector<float>&`, pybind11 passes it a copy of
+the list, and the list handed in is never filled in (2026-10-11, 2026.0.315).
+
+The route that works is **`ExportOBJ` with its option object, then parsing the file**.
+`bExportAvatar = True`, `bExportGarment = False` wrote the avatar alone — 13,399 vertices
+in 0.03 s — in millimetres, `y` up, `+z` the avatar's front; `Nardo`'s group was named
+`Mesh`. Check the file exists before parsing it: see Execution environment for an export
+that reports success and writes nothing.
+
+---
+
+## Placing pieces in 3D
+
+Drawn together from measurements elsewhere in this document, all on 2026.0.315.
+
+**What moves a piece:** the arrangement point named in `SetArrangement`, which receives
+the centre of the piece's 2D bounding box with 2D `+y` up, and
+`SetArrangementOrientation`, in degrees from a default of 180, and
+`SetArrangementPosition`'s position round and along the point's bounding volume and
+distance from it — applied only when the piece is re-placed, by re-setting its
+orientation (see Arrangement). The rest follows from how the piece is drafted: it extends
+from that centre as far as its outline does.
+
+**What does not:** the `fOffSetX`/`fOffSetY` in pattern JSON's `ArrangementPointDataMap`,
+which import discards; and `ResetClothArrangement` after such an import.
+
+**And a point's name does not say where it is.** Resolve the point's world position, and
+after arranging export an OBJ and read the piece's bounding box — nothing else reports it.
+
+**A workaround that got cloth onto the body, and is not a way to build a garment:** draft
+pieces short, so that their bounding-box centre, and so the piece, arranges near the
+target; sew and simulate; then lengthen with `MovePatternPoint` between simulation runs.
+The 2026-10-11 cape session did this and the user judged the result unusable: it
+re-meshes at every step, drifts curves, and needed freezing and gravity toggling to work
+at all. See [sessions/2026-10-11-vampire-cape.md](sessions/2026-10-11-vampire-cape.md)
+and [roadmap.md](roadmap.md). Mechanics, if it is used for a probe: It is an absolute move, so read each hem point's current position, add
+the extra length, and send the sum. Read the outline back after each move, because one MD
+will not accept leaves the piece unchanged without an error, and remember that a moved
+corner carries the adjacent curve with it.
 
 ---
 
@@ -317,6 +445,19 @@ on that scene it agreed with the Object Browser exactly — four entries, same o
 **`AddFabric(_path)` takes a file path to a `.zfab`, not a name.** Handed a plain string
 it adds nothing, raises nothing, and **returns `0`** — indistinguishable from having
 successfully added the fabric at index 0. Check `GetFabricStyleNameList()` afterwards.
+
+**Loading a preset is the only way to change how a fabric behaves.** No call anywhere in
+the API sets a physical property — stretch, bending, density. `GetFabricInformation`
+returns metadata only: `Classification`, `Color`, `ColorCode`, `Content`, `Owner`,
+`Print`, `SupplierName`, `Texture`, `Thickness` (`'0.5 mm'`) and `Weight`
+(`'300 g/m2'`), as strings. `GetFabricInfo` returned only
+`{"rollWidth": 44, "styleChipList": []}` (both 2026-10-11, 2026.0.315). So choose the
+behaviour by handing `AddFabric` one of the shipped `.zfab` presets:
+
+- `C:/Users/Public/Documents/MarvelousDesigner/New Assets/Fabric/*.zfab` — about 70:
+  `V2_Woven_*`, `V2_Cut_Sew_Knit_*`, `V2_Animal_Alternatives_*`, `V2_Leather_Full_Grain`,
+  `V2_Non-Fabric_*` and `(Default for Simulation)`, plus two more under `Elastic/`.
+- `<MD install>/Preset/Bond/*.zfab` — fusibles and reinforcements.
 
 `SetFabricName` and `SetFabricPBRMaterialBaseColor(_fabric, _colorway, r, g, b, a)`
 work and read back.
@@ -434,9 +575,11 @@ line's `Line type` is `"Straight type"` for a straight line and `""` for a curve
 lengths and types.
 
 Its `PointList` holds **only the straight points**: a 7-point contour with 3 spline
-points reports 4. The interior of a sampled curve cannot be read back at all, so
-verification from outside MD reaches a curve's endpoints and its total length and stops
-there. A shape can be wrong in ways nothing but simulation or an eye will show.
+points reports 4. A sampled curve's interior is in neither information call;
+**`ExportPatternJSON` carries it**: the document
+lists every point of every line, a type-`2` point coming back as `PointType "Polyline"`
+(2026-10-11, 2026.0.315). A shape can still be wrong in ways nothing but simulation or an
+eye will show.
 
 ---
 
@@ -459,7 +602,10 @@ is safe as the checkpoint between sessions.
 **As a document** — `pattern_api.ExportPatternJSON(_path)` / `ImportPatternJSON(_path)`.
 Measured round trip: two sewn panels exported, `NewProject`, re-imported — both pieces
 back with their names, both seam groups back, and a 360 mm edge still exactly 360 mm.
-Import **replaces** the scene.
+Import **replaces** the scene — but not all of it. Measured 2026-10-11 on 2026.0.315, the
+avatar stayed, and the document's fabric was added beside the one already there:
+`GetFabricStyleNameList()` went from `['FABRIC 1']` to `['FABRIC 1', 'FABRIC 1']`. Check
+the fabric list after an import.
 
 The document is richer than the call API, which is the reason to know about it:
 
@@ -468,10 +614,12 @@ formatVersion, Unit ("mm"), generator
 FabricList              FabricName, FabricUUID, FabricType, strBaseColorHexCode, …
 PatternList[]           ID, Name, CurrentFabricUUID, fGrainlineAngle, IsClosed,
                         IsHalfSymmetric, ShapeInfo.LineList[].PointList[]
-                          (ID, PointType "Straight"/…, GradingRuleID, Position{x,y}),
+                          (ID, PointType "Straight"/"Polyline"/…, GradingRuleID,
+                          Position{x,y}),
                         InternalLineList, NotchList, OuterSeamAllowanceList,
                         ButtonHeadList, ButtonHoleList, AnnotationList,
                         ArrangementPointDataMap
+                          {PointName, fOffSetX, fOffSetY, fAngle}
 SeamLinePairGroupList[] Name, bIsTurned, FoldData{iAngle,iStrength}, PairList[]
                           {First,Second}: ShapeID, LengthParam{fStart,fEnd}, Direction
 GradingRuleTableList, SymmetricDataList, InstanceDataList, POMList
@@ -491,6 +639,13 @@ raised. It reads documents you author, not only ones MD exported — `PatternLis
 suffices and your IDs survive — but write every field explicitly. The safest way is to
 export a document from a scene MD built and edit that, rather than authoring one from
 nothing.
+
+**The arrangement offsets in the document are discarded.** With a piece's
+`ArrangementPointDataMap.fOffSetY` set to `-300` and the document imported, the piece's
+3D bounding box was identical to the millimetre, a fresh export read `fOffSetY` back as
+`0.0`, and `utility_api.ResetClothArrangement()` afterwards did not move it either
+(2026-10-11, 2026.0.315). The working per-piece offset is `SetArrangementPosition`
+followed by a re-placement — see Arrangement.
 
 **DXF is not reachable.** `ApiTypes.ImportDxfOption` and `ExportDxfOption` both exist,
 with the full set of grading, notch and seam-allowance fields, and **no function in the
@@ -522,9 +677,25 @@ does not.** The names are one word apart and only one of them does anything, whi
 expensive to discover: without the right one there is no way to look at the back of a
 garment, and the obvious-looking call fails silently.
 
-`SetCamViewPoint(0..7)` gives eight distinct views — front, three-quarter, side and
-round the back. Follow it with `utility_api.Refresh3DWindow()` and then
-`export_api.ExportSnapshot3D(path)`. Verified by eye on 2026-09-19, 2026.0.315.
+`SetCamViewPoint` takes 0 to 9, exactly as MD's own API list documents them — measured by
+eye on 2026-10-11, 2026.0.315, with `Nardo`:
+
+| n | View |
+| --- | --- |
+| 0 | bottom |
+| 1 | three-quarter right |
+| 2 | front |
+| 3 | three-quarter left |
+| 4 | right |
+| 5 | top |
+| 6 | left |
+| 7 | focus zoom: keeps the direction — after 2 it zoomed in on the front, and after 6 its snapshot was byte-identical to 6's |
+| 8 | **back** |
+| 9 | zoom to fit: keeps the direction — after 2 the whole front, after 4 the whole side, after 8 the whole back |
+
+So the back is 8, outside the 0..7 this document claimed from 2026-09-19 as "eight
+distinct views … round the back" — 7 only repeated 6 there. Follow it with
+`utility_api.Refresh3DWindow()` and then `export_api.ExportSnapshot3D(path)`.
 
 **Snapshot bytes move once there is cloth, and hold still before that.** Sixteen
 captures of one draped garment at one camera position produced sixteen different
@@ -584,8 +755,9 @@ change and cannot put it back. Combined with there being no undo, freeze is a on
 edit: reload the project if the previous state mattered.
 
 **Not exposed at all:** darts · pleats · bezier tangent handles · reading a piece's line
-list · undo. Seam allowances, notches and button placement are not exposed *as calls*,
-but are reachable through pattern JSON.
+list · a fabric's physical properties (load a preset `.zfab`) · undo. Seam allowances,
+notches and button placement are not exposed *as calls*, but are reachable through
+pattern JSON.
 
 ---
 
@@ -594,17 +766,34 @@ but are reachable through pattern JSON.
 MD's interpreter is **CPython 3.11.8**, with `socket`, `threading`, `http.server`,
 `subprocess` and `ssl` importable.
 
-**Python only runs while a script is running.** An MD API call from a background thread
+**Python threads only run while a script is running.** An MD API call from a background thread
 does work — but only during a script. The moment the script returns, MD stops releasing
 the GIL and every Python thread freezes where it stands: a thread ticked 20 times while
 its script's main thread slept two seconds, and zero times afterwards, with `is_alive()`
 still `True`. This corrects an earlier reading of the same measurement, which took "a
 worker thread works" to mean a worker thread keeps working.
 
-**Nothing calls Python back**, either: there is no idle, timer or event callback anywhere
-in the API. So anything that must outlive a script has to *be* a script that does not
-return — which is what the listener is, and why it pumps MD's message queue to keep MD
-usable while it holds the main thread (`docs/adr/001-bridge-transport.md`).
+**The API never calls Python back** — there is no idle, timer or event callback in it —
+**but Windows will.** A `user32.SetTimer` thread timer armed through `ctypes` is
+dispatched by MD's own message loop on MD's main thread, after the script that armed it
+has returned. Measured 2026-10-11 on 2026.0.315: a top-level Python Editor Run armed a
+25 ms timer polling a non-blocking socket and returned at once; with nothing else
+running, the callback answered 100 requests at a 31 ms median (one tick: Windows rounds
+25 ms up), ran on the thread that armed it, and called `pattern_api.GetPatternCount()`
+without error. MD's viewport and menus stayed responsive, and closing MD ended the
+process — which the never-returning listener does not. The callback object must be
+kept referenced (it was stored on `builtins`), and an exception must never leave it.
+
+So a script that does not return is no longer the only way to outlive a script, and the
+listener is no longer one: from 2026-10-11 **Start MCP** arms a 10 ms timer and returns,
+and **Stop MCP** kills it. Before that the listener was a Run that never finished,
+pumping MD's message queue to keep MD usable while it held the main thread, and closing
+MD left the process running behind it.
+
+**A tick must never run inside another.** An MD call that pumps the message queue — a
+modal dialog does — lets the timer fire inside the request that made the call, and a
+tick that served there would run a second request in the middle of the first. The
+listener's tick returns at once when one is already running.
 
 **A modal dialog raised by an MD call stops everything**, for the same reason: it holds
 the main thread, and nothing at MD's end times out. See Sewing for the measured case.
@@ -624,6 +813,12 @@ rules out "merely slow" — but the cause stopped mattering once the working for
 found. This is the same shape as the 37 other calls that take an MD option object: the
 overload without one is not the convenient version, it is the one that stops.
 
+**And the paths it returns are not evidence of a write.** Measured 2026-10-11 on
+2026.0.315: `ExportOBJ(path, ImportExportOption)` into a folder that did not exist
+returned the `[".obj", ".mtl"]` path list exactly as on success, and wrote nothing. After
+`os.makedirs` on the folder, the identical call wrote both files. Create the folder first,
+and check the files exist before reading anything from them.
+
 Scripts run inside MD via **Main Menu → Plugins → Python Editor** — there is no Script
 menu in this build, whatever the published docs say — or from a plugin registered through
 Plugin tab → Plug-in Manager → + ADD. Only `.py` files, and no manifest.
@@ -642,7 +837,7 @@ else is busy, not because anything is wrong.
 
 ### A stale listener produces tracebacks that cannot be read
 
-The listener is a script MD loaded when **Start** was pressed. Editing
+The listener is a script MD loaded when **Start MCP** was clicked. Editing
 `md_mcp_listener.py` afterwards does not touch the running instance — and because Python
 reads the file off disk when it formats a traceback, a failure then reports **the running
 instance's line numbers beside the new file's source**. The two disagree, so the
@@ -651,47 +846,65 @@ traceback points at unrelated code: a division-by-zero inside a script was repor
 
 That reads as a bug in the listener. It is not; it means the listener in MD predates the
 file. Failure replies carry `plugin_version` and `plugin_build` for this reason, and the
-bridge appends them to the error. If the build is not the one just installed, **Stop and
-Start the listener** — the scene lives in MD, not in the listener, so restarting it
-loses nothing.
+bridge appends them to the error. If the build is not the one just installed, **click
+Stop MCP, then Start MCP**, which reads the file afresh — the scene lives in MD, not in
+the listener, so restarting it loses nothing.
 
 ### Registering a plugin
 
-**`utility_api.RegisterPythonScript(_name, _path)` works from the Python Editor, and
-the entry appears without restarting MD.** Run as a plain script there with nothing else
-going, it put a working entry in the Plugin tab there and then — confirmed by eye on
-2026.0.315, 2026-09-19.
+**`utility_api.RegisterPythonScript(path, title)` takes the path first.** The binding
+names its parameters `arg0, arg1`, and this document used to say `(_name, _path)`. MD's
+own plugin log settles it:
+`C:\Users\Public\Documents\MarvelousDesigner\New Assets\api_plugin_log.txt` records every
+registration attempt and why it failed. Measured 2026-10-11 on 2026.0.315:
 
-**And it answers `False` when it is called from a script that is running inside another
-one.** Four attempts through the bridge — whose serve loop holds the main thread, so
-anything it runs is nested inside it — were all declined and none appeared: three names
-at once through `RegisterPythonScriptW`, then one through `RegisterPythonScript`, then
-the same one with the colon taken out of its name. Same session, same MD, minutes after
-the Editor call that worked. So neither the wide twin, nor the name, nor the folder is
-the variable; the nesting is what is left, and that is a strong inference and not a
-controlled measurement. **Register from a top-level Run, and check the bool**: it is the
-only signal MD gives, there is no reader for the plugin list, and treating `False` as
-success means an entry nobody ever registers again.
+| Call | Log | Returned |
+| --- | --- | --- |
+| `RegisterPythonScriptW("Start MCP", <listener>)`, from a Plugin tab click | "Failed to register Python script because the script path is invalid: C:/Program Files/Marvelous Designer Enterprise Network Offline/Start MCP" | `False` |
+| `RegisterPythonScriptW(<listener>, "Start MCP")`, over the bridge | "Skipped Python script registration because the script is already registered: …/md_mcp_listener.py" | `False` |
+| `RegisterPythonScriptW(<md_mcp_stop.py>, "Stop MCP")`, over the bridge | "Skipped … already registered: …/md_mcp_stop.py", though it never had been | `False` |
 
-`RegisterPythonScriptFolder(_name, _path)` takes a name and a directory and is **not
-exercised** — whether it produces a group rather than loose entries is worth an hour to
-whoever needs a submenu. Both calls have `…W` twins.
+So the title went in as a path relative to MD's install folder. The same log holds an
+older line ending "…/md-mcp", from this repo's first registration attempts — which were
+long read here as **MD refusing registrations made from inside another script**. That
+theory explained four failures through the old bridge; argument order explains those and
+these too, and nothing now supports the nesting theory. The entry that worked on
+2026-09-19 is titled `md_mcp_listener`, after the file rather than any title this repo
+passed, so it was very likely added another way.
 
-**Nothing unregisters.** There is no remover anywhere in the six modules and no reader
-for the list either, so a registered entry cannot be counted, replaced or withdrawn from
-Python — only removed by hand in Plug-in Manager. A registration is therefore permanent
-from the API's point of view, which makes "have I already registered this?" a question
-that has to be answered outside MD.
+**A path MD already has is declined, whatever the title**, and a new script in the same
+folder as a registered one was declined too, with a log line claiming it was already
+registered. Why is not known; a per-folder check is a guess. Check the bool and read the
+log.
+
+**The plugin list is a file:**
+`C:\Users\Public\Documents\MarvelousDesigner\Plugins\pluginSettings.json` holds every
+entry — `m_PlugInFileName`, `m_PlugInTitle`, `m_BaseMenuTreeByObjectName`
+(`"Plugins / Plug-in"`), `m_SourceType` (`"script"`) — and MD rewrote it as it exited
+(2026-10-11, at the moment MD closed). So "is it already registered?" can be answered by
+reading that file, which this document used to say was impossible, and an entry could
+probably be added or removed by editing it while MD is closed. That last part is
+unmeasured.
+
+`RegisterPythonScriptFolder` is **not exercised**, and its argument order is unmeasured
+too — whether it produces a group rather than loose entries is worth an hour to whoever
+needs a submenu. Both calls have `…W` twins.
+
+**Nothing in the API unregisters.** There is no remover in the six modules, so from
+Python an entry can only be removed by hand in Plug-in Manager — or, unmeasured, by
+editing `pluginSettings.json` with MD closed.
 
 **A plugin clicked while another script is running executes *nested* inside it, on MD's
 main thread.** Measured through the bridge on 2026.0.315: with the serve loop holding the
 main thread and pumping messages, a script run at that moment reported
 `threading.current_thread() is threading.main_thread()` and could read the running
 listener's own state off `builtins`. Two things follow. A second script can reach and
-change the first one's state, which is how a Stop button is possible at all — it sets a
-flag and returns, and the loop below it acts on the flag when it resumes. And the first
-script cannot act on anything until the second returns, which is why the clicked script
-has to return promptly and why a modal dialog in it stops everything.
+change the first one's state, which is how the old listener's Stop button worked — it
+set a flag and returned, and the loop below it acted on the flag when it resumed. And the
+first script cannot act on anything until the second returns, which is why a clicked
+script has to return promptly and why a modal dialog in it stops everything. With the
+timer listener nothing is running between requests, so a click on Stop MCP runs at top
+level and finds the listener on `builtins` all the same.
 
 **What MD gives a clicked plugin is not known.** Whether `__file__` or `__name__` is set,
 and where its `print` output goes, have not been measured. Anything registered should
@@ -737,12 +950,13 @@ MD's main window is as far in as Python gets — and it is worth saying that the
 still does not read as MD: stock Qt widgets wearing MD's palette look like a dark Qt
 dialog, not like MD's own controls, which are drawn by MD. `plugin/md_mcp_listener.py`
 tried this, kept the measurements, and went back to a plain `user32` window rather than
-put ninety megabytes of PySide6 inside MD's interpreter for it.
+put ninety megabytes of PySide6 inside MD's interpreter for it — and since 2026-10-11 has
+no window at all, only Start MCP and Stop MCP in the Plugin tab.
 
-**A Qt widget must be driven by whatever script holds the main thread.** MD only runs
-Python while a script runs, so the panel is refreshed from the serve loop, which pumps
-the Win32 queue and calls `QApplication.processEvents()`. Never `exec()`/`mainloop()`:
-that would hold the thread for as long as the window was open.
+**A Qt widget must be driven from MD's main thread, without a loop of its own.** The old
+listener refreshed its panel from its serve loop, which pumped the Win32 queue and called
+`QApplication.processEvents()`; a timer callback would do the same job now. Never
+`exec()`/`mainloop()`: that would hold the thread for as long as the window was open.
 
 **Qt does not accept posted synthetic clicks.** `PostMessage(WM_LBUTTONDOWN)` to the
 panel's HWND did nothing; `SendInput` against a raised, foregrounded window worked, and
@@ -762,7 +976,7 @@ measured inside MD 2026.0.315 on 2026-09-19, not merely written. `RegisterClassW
 loop's existing `PeekMessageW` pump dispatches its messages: `WM_COMMAND` posted to it
 from *another process* ran its window procedure on MD's main thread and stopped and
 restarted the bridge, with the labels following each change. No toolkit and nothing
-installed.
+installed. (The listener dropped its window on 2026-10-11; this stays as a measurement.)
 
 Two rules come with it. **The window must never run a loop of its own** — it is
 refreshed and pumped by whatever script is holding the main thread, and a `mainloop()`
