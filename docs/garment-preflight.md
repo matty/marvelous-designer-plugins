@@ -33,10 +33,12 @@ observations below were made on MD 2026.0.315 on September 21, 2026.
    actual MD curve interpretation; a straight polygon approximation is only a screen.
    After moving points, read all changed coordinates back before adding sewing.
 
-The shared md-mcp-reliability skill includes scripts/check_seam_plan.py, an offline
-ledger validator for duplicate/self seams, overlapping edge intervals and lengths.
-It uses semantic edge IDs and normalized arc-length intervals. Populate those from
-current MD measurements; the script does not discover seams or mutate the host.
+`md_seams` reads the ledger back from MD: for each seam, both pieces, the span along
+each outline in mm, the line numbers it covers, direction and lengths, with warnings for
+an edge sewn to an overlapping part of itself, one stretch of edge in two seams, and
+sides more than 5 mm apart. Pass the fingerprint of an earlier read as `since` to see the
+seams added and removed since. It reports what MD holds; checking that against the plan
+is still yours.
 
 ## After a small sewing batch
 

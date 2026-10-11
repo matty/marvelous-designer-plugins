@@ -275,3 +275,15 @@ def test_the_instructions_fit_inside_claude_codes_cut_off() -> None:
     # anything past the cut never reaches the model. Guidance that will not fit belongs
     # in a tool description or a document, not here.
     assert len(build_server().instructions) <= 2048
+
+
+def test_every_tool_says_what_it_does_to_md(server) -> None:
+    # Unannotated, MCP presents every tool as destructive -- md_guide included.
+    by_name = {tool.name: tool.annotations for tool in tools(server)}
+
+    assert all(annotation is not None for annotation in by_name.values()), by_name
+    for name in ("md_status", "md_api", "md_seams", "md_guide", "md_measure"):
+        assert by_name[name].read_only_hint is True, name
+    for name in ("md_call", "run_md_python", "md_restore"):
+        assert by_name[name].destructive_hint is True, name
+    assert by_name["md_snapshot"].read_only_hint is False  # it moves the camera

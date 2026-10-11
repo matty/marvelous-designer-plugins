@@ -34,6 +34,7 @@ from typing import Any
 
 from mcp.server.mcpserver import Image, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
+from mcp.types import ToolAnnotations
 
 from md_mcp import __version__, bridge, checkpoints, dialogs, guide, seams
 
@@ -290,6 +291,18 @@ def _shrink_png(data: bytes, max_size: int) -> bytes:
         gdi.GdiplusShutdown(token)
 
 
+#: What each tool does to MD, for clients that act on MCP's tool annotations -- an
+#: unannotated tool is presented as destructive and non-idempotent.
+READS = ToolAnnotations(read_only_hint=True, idempotent_hint=True, open_world_hint=False)
+#: Leaves the garment as it was, but not everything: moves the camera, adds and removes
+#: a probe piece, or writes a checkpoint file.
+TOUCHES = ToolAnnotations(read_only_hint=False, destructive_hint=False, open_world_hint=False)
+#: Runs whatever it is given inside MD, which has no undo.
+CHANGES = ToolAnnotations(read_only_hint=False, destructive_hint=True, open_world_hint=False)
+#: Discards the open garment.
+REPLACES = ToolAnnotations(read_only_hint=False, destructive_hint=True, open_world_hint=False)
+
+
 def build_server() -> MCPServer:
     server = MCPServer(
         name="md-mcp",
@@ -326,7 +339,7 @@ def build_server() -> MCPServer:
         ),
     )
 
-    @server.tool()
+    @server.tool(annotations=READS)
     @_reportable
     def md_status() -> dict:
         """Check that Marvelous Designer is reachable, and say which build it is.
@@ -364,7 +377,7 @@ def build_server() -> MCPServer:
         status["dialogs"] = dialogs.showing()
         return status
 
-    @server.tool()
+    @server.tool(annotations=READS)
     @_reportable
     def md_api(search: str = "", query: str = "") -> dict:
         """Search everything the running Marvelous Designer exposes.
@@ -397,7 +410,7 @@ def build_server() -> MCPServer:
         found = bridge.api(term)
         return {"search": term, "count": len(found), "calls": found}
 
-    @server.tool()
+    @server.tool(annotations=CHANGES)
     @_reportable
     def md_call(function: str, args: list | None = None) -> dict:
         """Call one Marvelous Designer API function and return what it returned.
@@ -426,7 +439,7 @@ def build_server() -> MCPServer:
             reply["dialog_warning"] = dialogs.describe(showing)
         return reply
 
-    @server.tool()
+    @server.tool(annotations=CHANGES)
     @_reportable
     def run_md_python(source: str, timeout_seconds: float | None = None) -> dict:
         """Run a Python script inside Marvelous Designer and report what it printed.
@@ -481,7 +494,7 @@ def build_server() -> MCPServer:
                 result[key] = reply[key]
         return result
 
-    @server.tool()
+    @server.tool(annotations=READS)
     @_reportable
     def md_measure(
         heights: list[float] | None = None,
@@ -521,7 +534,7 @@ def build_server() -> MCPServer:
             raise ValueError(f"max_groups cannot be negative, not {max_groups!r}")
         return bridge.measure(heights or [], band_mm, group_search, max_groups)
 
-    @server.tool()
+    @server.tool(annotations=TOUCHES)
     @_reportable
     def md_arrangement_points(
         points: list[str | int] | None = None, timeout_seconds: float | None = None
@@ -595,7 +608,7 @@ def build_server() -> MCPServer:
         meta["bytes"] = len(data)
         return meta, Image(data=data, format=kind)
 
-    @server.tool()
+    @server.tool(annotations=TOUCHES)
     @_reportable
     def md_snapshot(
         view: int | None = None,
@@ -638,7 +651,7 @@ def build_server() -> MCPServer:
             return [meta, image]
         return [{"views": [meta for meta, _ in pictures]}] + [image for _, image in pictures]
 
-    @server.tool()
+    @server.tool(annotations=READS)
     @_reportable
     def md_fabric_presets(search: str = "") -> dict:
         """List the fabric presets on this machine: the .zfab files AddFabric needs.
@@ -660,7 +673,7 @@ def build_server() -> MCPServer:
         """
         return bridge.fabric_presets(search)
 
-    @server.tool()
+    @server.tool(annotations=READS)
     @_reportable
     def md_guide(topic: str = "") -> dict:
         """How Marvelous Designer behaves through md-mcp: read it before changing anything.
@@ -677,7 +690,7 @@ def build_server() -> MCPServer:
         """
         return guide.read(topic)
 
-    @server.tool()
+    @server.tool(annotations=TOUCHES)
     @_reportable
     def md_checkpoint(label: str = "") -> dict:
         """Save the garment to a checkpoint, so it can be put back with md_restore.
@@ -741,7 +754,7 @@ def build_server() -> MCPServer:
         ]
         return result
 
-    @server.tool()
+    @server.tool(annotations=REPLACES)
     @_reportable
     def md_restore(checkpoint: str = "latest") -> dict:
         """Put a checkpoint's garment back. DISCARDS THE GARMENT THAT IS OPEN NOW.
@@ -791,7 +804,7 @@ def build_server() -> MCPServer:
     # changed since one of them. In this process only: a restarted server starts empty.
     ledgers: dict[str, dict] = {}
 
-    @server.tool()
+    @server.tool(annotations=READS)
     @_reportable
     def md_seams(since: str = "", max_groups: int = 200) -> dict:
         """What MD has actually sewn to what: the seam ledger, read out of MD.

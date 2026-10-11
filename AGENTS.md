@@ -156,8 +156,10 @@ to be wrong, fix it in the same commit as the code and say which MD version you 
 
 Read docs/garment-preflight.md for the recommended construction checks, and load only
 the relevant measured sections of docs/md-conventions.md. Keep the transport generic:
-the seam ledger validator belongs to the shared md-mcp-reliability skill, not a curated
-replacement for MD's API. A count proves neither correct sewing nor collision freedom.
+md-mcp's tools check and show what MD did -- `md_seams` reads the ledger back and warns
+on an edge sewn twice or to itself -- and none of them replaces MD's API or encodes
+garment design (docs/roadmap.md). A count proves neither correct sewing nor collision
+freedom.
 
 Every run returns the complete available scene list. Do not reintroduce listener-global
 suppression: API queries and independent MCP clients also consume run replies.

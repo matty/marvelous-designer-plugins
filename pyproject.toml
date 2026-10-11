@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "md-mcp"
-version = "0.3.0"
+version = "0.4.0"
 description = "MCP server exposing a running Marvelous Designer's whole Python API"
 requires-python = ">=3.11"
 dependencies = [

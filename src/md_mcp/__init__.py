@@ -8,7 +8,7 @@ Everything MD exposes is reachable through them, and nothing here wraps it.
 with no Marvelous Designer. ``tests/test_no_md_imports.py`` enforces that.
 """
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 #: Modules injected by Marvelous Designer's embedded interpreter. Importing any of
 #: these outside MD raises ImportError, so no module in this package may do it.
