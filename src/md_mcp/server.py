@@ -33,7 +33,7 @@ from typing import Any
 from mcp.server.mcpserver import Image, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
-from md_mcp import __version__, bridge, seams
+from md_mcp import __version__, bridge, checkpoints, seams
 
 
 def _reportable(fn: Callable) -> Callable:
@@ -646,6 +646,101 @@ def build_server() -> MCPServer:
         fabric_api.AddFabric.
         """
         return bridge.fabric_presets(search)
+
+    @server.tool()
+    @_reportable
+    def md_checkpoint(label: str = "") -> dict:
+        """Save the open scene to a checkpoint, so it can be put back with md_restore.
+
+        MD's API has no undo and nothing removes a seam, so take one before any change
+        you might want to take back -- sewing above all. Saved as a .zprj under
+        %LOCALAPPDATA%\\md-mcp\\checkpoints (MD_MCP_CHECKPOINTS moves it), with a record
+        of what the scene held; the newest 30 are kept.
+
+        label: a few words to find it by later, e.g. "before lining seams".
+
+        Returns path, label, scene (pieces, seam groups, avatars, fabrics), project
+        (MD's open-project path before and after the save), recent checkpoints, and a
+        warning if saving re-pointed MD's open project at the checkpoint -- in which case
+        the user's next Save would write over the checkpoint, not their work. Fails, and
+        says not to go on, if MD wrote no file.
+        """
+        path = checkpoints.new_path(label)
+        saved, scene = bridge.checkpoint(str(path))
+        if not saved.get("bytes"):
+            raise bridge.BridgeError(
+                f"No checkpoint was written: ExportZPrj answered {saved.get('returned')!r} "
+                f"and {path} is missing or empty. Do not make the change this was for "
+                "until a checkpoint exists."
+            )
+        before = saved.get("project_before") or {}
+        after = saved.get("project_after") or {}
+        entry = checkpoints.record(
+            path, label, scene, {"project_before": before, "project_after": after}
+        )
+        result: dict[str, Any] = {
+            "path": str(path),
+            "label": label,
+            "bytes": saved["bytes"],
+            "scene": entry["scene"],
+            "project": {"before": before, "after": after},
+        }
+        if "value" in before and "value" in after and before["value"] != after["value"]:
+            result["warning"] = (
+                f"Saving the checkpoint re-pointed MD's open project from "
+                f"{before['value']!r} to {after['value']!r}. A Save in MD now writes over "
+                "the checkpoint, not the original project -- tell the user before they "
+                "save, and use Save As to put it back."
+            )
+        pruned = checkpoints.prune()
+        if pruned:
+            result["pruned"] = len(pruned)
+        result["recent"] = [
+            {key: item.get(key) for key in ("path", "label", "created")}
+            for item in checkpoints.listed()[:5]
+        ]
+        return result
+
+    @server.tool()
+    @_reportable
+    def md_restore(checkpoint: str = "latest") -> dict:
+        """Replace the open scene with a checkpoint. DISCARDS WHATEVER IS OPEN NOW.
+
+        checkpoint: "latest" (the default), a label given to md_checkpoint, a checkpoint
+            file name, or a path to any .zprj.
+
+        Imports the .zprj, which replaces the scene, then reads the scene back and
+        compares it with the record taken when the checkpoint was saved. Returns
+        restored (the path), scene, matches_checkpoint and differences. Piece indices
+        are those of the checkpoint, not of the scene that was replaced -- look pieces up
+        by name again before the next call that takes an index.
+        """
+        entry = checkpoints.resolve(checkpoint)
+        if entry is None:
+            recent = [
+                f"{item.get('label') or '(no label)'}: {item['path']}"
+                for item in checkpoints.listed()[:10]
+            ]
+            raise ValueError(
+                f"no checkpoint matches {checkpoint!r}. "
+                + ("Recent ones: " + "; ".join(recent) if recent else
+                   f"There are none in {checkpoints.folder()} yet.")
+            )
+        loaded, scene = bridge.restore(entry["path"])
+        result: dict[str, Any] = {
+            "restored": entry["path"],
+            "label": entry.get("label", ""),
+            "returned": loaded.get("returned"),
+            "scene": scene,
+        }
+        if "scene" in entry:
+            differences = checkpoints.compare(entry["scene"], scene)
+            result["matches_checkpoint"] = not differences
+            result["differences"] = differences
+        else:
+            result["matches_checkpoint"] = None
+            result["differences"] = ["no record was kept with this file, so nothing to compare"]
+        return result
 
     # The last few ledgers md_seams read, by fingerprint, so a later call can say what
     # changed since one of them. In this process only: a restarted server starts empty.

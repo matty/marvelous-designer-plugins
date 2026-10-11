@@ -110,6 +110,10 @@ class FakeMDHost:
         self.exports_write = True
         self.snapshot_size = (640, 480)
         self.camera: int | None = None
+        #: MD's open-project path. Whether ExportZPrj re-points it at the copy is
+        #: unmeasured, so both answers can be tested.
+        self.project_path = ""
+        self.zprj_repoints_project = False
         #: Every file an export actually wrote, so a test can prove they were removed.
         self.written: list[str] = []
 
@@ -262,9 +266,43 @@ class FakeMDHost:
         self._write(path, png_bytes(*self.snapshot_size))
         return [[path]]
 
+    #: The scene state a .zprj carries here, so a checkpoint round-trips for real.
+    _ZPRJ_FIELDS = ("piece_names", "shape_counts", "piece_points", "placements", "seams",
+                    "seam_groups", "avatars", "fabrics")
+
     def ExportZPrj(self, path: str) -> bool:
         self.calls.append(("ExportZPrj", path))
-        self._write(path, b"fake zprj")
+        state = {field: getattr(self, field) for field in self._ZPRJ_FIELDS}
+        if self._write(path, json.dumps(state).encode("utf-8")) and self.zprj_repoints_project:
+            self.project_path = path
+        return True
+
+    def GetProjectFilePath(self) -> str:
+        return self.project_path
+
+    def ImportZprj(self, *args) -> bool:
+        if len(args) < 2:
+            # pybind11's wording when the option object is missing, which md-mcp turns
+            # into advice: md_call cannot build an MD object.
+            raise TypeError(
+                "ImportZprj(): incompatible function arguments. The following "
+                "argument types are supported:\n    1. (arg0: str, arg1: "
+                "Marvelous::ImportZPRJOption) -> bool\n\nInvoked with: {!r}".format(args[0])
+            )
+        path = args[0]
+        self.calls.append(("ImportZprj", path))
+        with open(path, encoding="utf-8") as handle:
+            state = json.load(handle)
+        for field in self._ZPRJ_FIELDS:
+            value = state[field]
+            if field in ("piece_points",):
+                value = [[tuple(point) for point in points] for points in value]
+            elif field == "placements":
+                value = [tuple(place) if place is not None else None for place in value]
+            elif field == "seams":
+                value = [tuple(seam) for seam in value]
+            setattr(self, field, value)
+        self.project_path = path
         return True
 
     def ExportTurntableImages(self, path: str, count: int, width: int, height: int,
@@ -398,6 +436,7 @@ class FakeMDHost:
 
         api_types = types.ModuleType("ApiTypes")
         api_types.ImportExportOption = ImportExportOption
+        api_types.ImportZPRJOption = type("ImportZPRJOption", (), {})
 
         # pybind11 raises TypeError with this exact shape when no overload matches, and
         # md-mcp turns it into advice. Two kinds, because they need different advice:
@@ -409,17 +448,11 @@ class FakeMDHost:
                 "int) -> None\n\nInvoked with: 1"
             )
 
-        def _wants_an_md_object(*args) -> None:
-            raise TypeError(
-                "ImportZprj(): incompatible function arguments. The following "
-                "argument types are supported:\n    1. (arg0: str, arg1: "
-                "Marvelous::ImportZPRJOption) -> bool\n\nInvoked with: 'C:/x.zprj'"
-            )
-
         utility_api.SetSimulationQuality = _no_overload_matches
 
         import_api = types.ModuleType("import_api")
-        import_api.ImportZprj = _wants_an_md_object
+        import_api.ImportZprj = self.ImportZprj
+        utility_api.GetProjectFilePath = self.GetProjectFilePath
 
         fabric_api = types.ModuleType("fabric_api")
         fabric_api.GetFabricStyleNameList = lambda: list(self.fabrics)

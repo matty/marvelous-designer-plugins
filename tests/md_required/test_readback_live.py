@@ -198,3 +198,28 @@ def test_seams_reads_back_which_lines_were_joined(empty) -> None:
                for pair in group["pairs"] for length in pair["length_mm"])
     # Nothing here is sewn twice or to itself, and MD's lengths match the document's.
     assert ledger["warnings"] == {}, ledger["warnings"]
+
+
+# ------------------------------------------------------------ md_checkpoint/md_restore
+
+
+def test_a_checkpoint_round_trips_and_says_where_mds_project_points(
+    empty, tmp_path, monkeypatch
+) -> None:
+    from md_mcp.server import build_server
+    from tests.test_server import call, payload
+
+    monkeypatch.setenv("MD_MCP_CHECKPOINTS", str(tmp_path))
+    server = build_server()
+    bridge.run_script(SQUARE, name="square.py")
+
+    saved = payload(call(server, "md_checkpoint", {"label": "live"}))
+    # The open question this settles (docs/roadmap.md): does saving a copy re-point
+    # MD's open project at it? Printed so the run records the answer either way.
+    print("project before/after ExportZPrj:", saved["project"], saved.get("warning"))
+
+    bridge.run_script(SQUARE.replace('"square"', '"extra"'), name="extra.py")
+    restored = payload(call(server, "md_restore", {"checkpoint": "live"}))
+
+    assert restored["matches_checkpoint"], restored["differences"]
+    assert [p["name"] for p in restored["scene"]["pieces"]] == ["square"]

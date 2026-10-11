@@ -50,6 +50,8 @@ port. `python tools/build_plugin.py` builds it; a `v*` tag publishes it beside t
 | `md_snapshot` | Pictures of the 3D window, returned as images. `view` 0–9 moves the camera (2 front, 8 back, 4 and 6 the sides) and leaves it there; `views=[2, 4, 8]` gives front, side and back in one call; `max_size` caps each image's long edge, default 1024 px |
 | `md_fabric_presets` | The `.zfab` files `AddFabric` needs, found beside the running MD and in Public and user Documents |
 | `md_seams` | What MD has actually sewn to what: each seam's pieces, spans and line numbers, warnings for an edge sewn twice or to itself, and what changed since an earlier read |
+| `md_checkpoint` | Save the open scene to a checkpoint `.zprj`, with a record of what it held; warns if MD re-points its open project at the copy |
+| `md_restore` | Replace the open scene with a checkpoint (`latest`, a label, or a path) and say whether it matches the record |
 
 ```
 md_api("Simulate")     -> the simulation calls this build has, with their signatures

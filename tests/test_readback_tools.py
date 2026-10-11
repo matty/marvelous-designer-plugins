@@ -125,7 +125,8 @@ def test_an_object_line_before_a_group_line_is_not_a_second_group(tmp_path) -> N
 def test_snippets_parse_as_the_python_md_embeds() -> None:
     # They run inside MD's CPython 3.11.8, not this interpreter.
     for source in (bridge._MEASURE, bridge._ARRANGEMENT, bridge._SNAPSHOT,
-                   bridge._FABRIC_PRESETS, bridge._SEAMS):
+                   bridge._FABRIC_PRESETS, bridge._SEAMS,
+                   bridge._CHECKPOINT, bridge._RESTORE):
         script = source.replace(bridge._PARAMS, repr(json.dumps({})))
         ast.parse(script, feature_version=(3, 11))
 

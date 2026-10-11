@@ -1130,6 +1130,57 @@ print(json.dumps(_result))
 '''
 
 
+#: md_checkpoint, inside MD. ExportZPrj to the path md-mcp chose, with MD's idea of its
+#: open project read before and after: if saving a copy re-points MD at the copy, the
+#: user's next Save goes over the checkpoint instead of their work, and they must be
+#: told. Where GetProjectFilePath lives is not measured, so every module is asked.
+_CHECKPOINT = r'''
+import json, os
+import export_api
+_params = json.loads(__MD_MCP_PARAMS__)
+
+
+def _mdmcp_project():
+    for _module_name in ("utility_api", "export_api", "import_api", "pattern_api"):
+        try:
+            _module = __import__(_module_name)
+        except ImportError:
+            continue
+        _call = getattr(_module, "GetProjectFilePath", None)
+        if _call is not None:
+            try:
+                return {"value": _call(), "call": _module_name + ".GetProjectFilePath"}
+            except Exception as _exc:
+                return {"error": "{}: {}".format(type(_exc).__name__, _exc)}
+    return {"error": "this build has no GetProjectFilePath"}
+
+
+_result = {"project_before": _mdmcp_project()}
+_path = _params["path"]
+_parent = os.path.dirname(_path)
+if _parent and not os.path.isdir(_parent):
+    os.makedirs(_parent)
+_returned = export_api.ExportZPrj(_path)
+_result["returned"] = _returned if isinstance(_returned, (bool, int, str)) else repr(_returned)
+_result["bytes"] = os.path.getsize(_path) if os.path.isfile(_path) else 0
+_result["project_after"] = _mdmcp_project()
+print(json.dumps(_result))
+'''
+
+#: md_restore, inside MD. ImportZprj needs its option object -- there is no one-argument
+#: form -- and replaces the open scene (measured: a 56-piece garment came back intact).
+_RESTORE = r'''
+import json, os
+import ApiTypes, import_api
+_params = json.loads(__MD_MCP_PARAMS__)
+if not os.path.isfile(_params["path"]):
+    raise FileNotFoundError("no checkpoint at {}".format(_params["path"]))
+_returned = import_api.ImportZprj(_params["path"], ApiTypes.ImportZPRJOption())
+print(json.dumps({"returned": _returned if isinstance(_returned, (bool, int, str))
+                  else repr(_returned)}))
+'''
+
+
 def _decode_printed(output: str) -> Any:
     """The JSON document a snippet printed -- its last line if something printed first."""
     try:
@@ -1222,6 +1273,23 @@ def snapshots(views: list[int | None]) -> list[tuple[bytes, dict]]:
 def snapshot(view: int | None = None) -> tuple[bytes, dict]:
     """A PNG of MD's 3D window, after moving the camera to ``view`` if one is given."""
     return snapshots([view])[0]
+
+
+#: The scene fields every run reply carries, read back by the listener after the run.
+SCENE_KEYS = ("pattern_count", "pieces", "seam_group_count", "avatars", "fabrics")
+
+
+def checkpoint(path: str) -> tuple[dict, dict]:
+    """Save the scene to ``path``: what the save reported, and the scene read back."""
+    saved, reply = _run_snippet(_CHECKPOINT, {"path": path}, "<md-mcp checkpoint>")
+    return saved, {key: reply[key] for key in SCENE_KEYS if key in reply}
+
+
+def restore(path: str) -> tuple[dict, dict]:
+    """Replace the scene with the checkpoint at ``path``: the import's answer, and the
+    scene read back afterwards."""
+    loaded, reply = _run_snippet(_RESTORE, {"path": path}, "<md-mcp restore>")
+    return loaded, {key: reply[key] for key in SCENE_KEYS if key in reply}
 
 
 def seams() -> dict:

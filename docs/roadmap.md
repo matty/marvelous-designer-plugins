@@ -28,9 +28,11 @@ cheap way to look at the result. The background is in the
    against the timer listener, plus a first live run of `md_measure`, `md_snapshot`,
    `md_arrangement_points` and `md_fabric_presets`. Start MCP stops showing a box when
    it succeeds, so a session costs one click.
-2. **`md_checkpoint` / `md_restore`.** `ExportZPrj` into a checkpoint folder, and
-   `ImportZprj` back (the round trip is measured). First check that `ExportZPrj` does not
-   re-point MD's open project, or the user's next Save would overwrite the checkpoint.
+2. ~~**`md_checkpoint` / `md_restore`.**~~ Built: `ExportZPrj` into
+   `%LOCALAPPDATA%\md-mcp\checkpoints` with a record of the scene, the newest 30 kept;
+   restore by label, `latest` or path, compared with the record. MD's project path is
+   read before and after each save, and the reply warns if it moved -- the live test
+   records which way MD goes.
 3. ~~**`md_seams`.**~~ Built: decodes `ExportPatternJSON`'s seam list into piece names,
    spans, line numbers and lengths, warns on an edge sewn twice or to itself, and diffs
    against an earlier read. Tested against a real export; the live test is written and
@@ -54,7 +56,8 @@ shows md-mcp itself is what fell short.
 
 Measure when MD is next open; none blocks the list above except where noted.
 
-- Does `ExportZPrj` change MD's project path? (blocks 2)
+- Does `ExportZPrj` change MD's project path? (`md_checkpoint` warns either way; the
+  live test records the answer.)
 - Is the cape session's meshing error a separate window, and is its text readable?
   (shapes 4)
 - What does a seam's `Direction` mean — two rectangles sewn each way.

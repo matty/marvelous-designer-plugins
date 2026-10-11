@@ -28,6 +28,8 @@ TOOLS = [
     "md_snapshot",
     "md_fabric_presets",
     "md_seams",
+    "md_checkpoint",
+    "md_restore",
 ]
 
 
