@@ -37,8 +37,10 @@ cheap way to look at the result. The background is in the
    spans, line numbers and lengths, warns on an edge sewn twice or to itself, and diffs
    against an earlier read. Tested against a real export; the live test is written and
    waits for the next MD session.
-4. **Dialog warning.** After a mutating reply, md-mcp lists MD's windows; if a dialog is
-   showing, the reply says so instead of success.
+4. ~~**Dialog warning.**~~ Built and live-tested. A modal dialog is an owned window with
+   MD's main window disabled, seen from md-mcp's own process: a blocked request gives up
+   in about 2 s and names it, and `run_md_python`, `md_call` and `md_status` report one
+   left showing after a reply. Its text is not readable from outside MD.
 5. ~~**`md_snapshot` sheet.**~~ Built: `views=[2, 4, 8]` returns front, side and back in
    one call, captured in one run inside MD. The live test waits for the next MD session.
 6. **A short guide to MD's behaviour** (`md_guide`, text only), because the server
@@ -56,8 +58,8 @@ shows md-mcp itself is what fell short.
 
 Measure when MD is next open; none blocks the list above except where noted.
 
-- Is the cape session's meshing error a separate window, and is its text readable?
-  (shapes 4)
+- Is the cape session's meshing error the same kind of window as the seam dialog?
+  Likely, and the detector would catch it either way; not yet seen.
 - What does a seam's `Direction` mean — two rectangles sewn each way.
 - Why did MD refuse to register Stop MCP? Until then, closing MD or a `shutdown`
   request stops the bridge.

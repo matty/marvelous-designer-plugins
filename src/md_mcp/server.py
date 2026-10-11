@@ -33,7 +33,7 @@ from typing import Any
 from mcp.server.mcpserver import Image, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
-from md_mcp import __version__, bridge, checkpoints, seams
+from md_mcp import __version__, bridge, checkpoints, dialogs, seams
 
 
 def _reportable(fn: Callable) -> Callable:
@@ -355,6 +355,9 @@ def build_server() -> MCPServer:
             "plugin_build": reply.get("plugin_build"),
         }
         status.update(_scene_summary(scene))
+        # Read from md-mcp's side, so it answers even when MD cannot: a modal dialog
+        # holds the thread that serves the bridge.
+        status["dialogs"] = dialogs.showing()
         return status
 
     @server.tool()
@@ -411,9 +414,12 @@ def build_server() -> MCPServer:
         and wrote nothing. A missing parent folder of an absolute path is created first
         and reported under ``created_folders``.
         """
-        result, writes = bridge.call_checked(function, args or [])
+        result, writes, showing = bridge.call_checked(function, args or [])
         reply = {"function": function, "result": result}
         reply.update(_write_fields(writes, function))
+        if showing:
+            reply["dialogs"] = showing
+            reply["dialog_warning"] = dialogs.describe(showing)
         return reply
 
     @server.tool()
@@ -466,6 +472,9 @@ def build_server() -> MCPServer:
         result.update(_write_fields(reply.get("writes")))
         if reply.get("writes_omitted"):
             result["writes_omitted"] = reply["writes_omitted"]
+        for key in ("dialogs", "dialog_warning"):
+            if key in reply:
+                result[key] = reply[key]
         return result
 
     @server.tool()

@@ -53,6 +53,8 @@ port. `python tools/build_plugin.py` builds it; a `v*` tag publishes it beside t
 | `md_checkpoint` | Save the garment to a checkpoint `.zpac`, with a record of what it held. Leaves MD's open project alone, which a `.zprj` save does not, and keeps MD asking to save before closing |
 | `md_restore` | Put a checkpoint's garment back (`latest`, a label, or a path), keeping the open avatar, and say whether it matches the record |
 
+A modal dialog in MD holds the thread that serves the bridge. md-mcp watches for one from outside MD: a request blocked by a dialog gives up in about two seconds and says so, and `run_md_python`, `md_call` and `md_status` report a dialog left showing after a reply. It can name the dialog but not read its text, so look at MD.
+
 ```
 md_api("Simulate")     -> the simulation calls this build has, with their signatures
 md_call("utility_api.Simulate", [400])

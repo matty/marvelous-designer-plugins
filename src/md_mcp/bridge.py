@@ -16,9 +16,10 @@ import json
 import os
 import pathlib
 import socket
+import time
 from typing import Any
 
-from md_mcp import notes
+from md_mcp import dialogs, notes
 
 HOST = "127.0.0.1"
 DEFAULT_PORT = 5121
@@ -116,8 +117,27 @@ def _died_mid_request(op: str, exc: OSError | None) -> str:
     )
 
 
-def request(op: str, timeout: float = QUERY_TIMEOUT, **payload: Any) -> dict:
-    """Send one request, return the reply. Raises :class:`BridgeError` on any failure."""
+#: How often a request waiting on MD looks for a modal dialog, and how many looks in a
+#: row must find one before the wait is abandoned. A dialog holds MD's main thread, so
+#: without this a request waits out its whole timeout -- 300 s for a script.
+DIALOG_POLL = 1.0
+DIALOG_POLLS = 2
+
+#: How long after a script's reply to look for a dialog it left behind. The cape
+#: session's meshing error appeared after the script had reported success.
+DIALOG_SETTLE = 0.15
+
+
+def request(
+    op: str, timeout: float = QUERY_TIMEOUT, look_after: bool = False, **payload: Any
+) -> dict:
+    """Send one request, return the reply. Raises :class:`BridgeError` on any failure.
+
+    While waiting it looks for a modal dialog in MD about once a second, and gives up on
+    the reply -- not the work -- once one has been up for two looks. With
+    ``look_after`` it looks once more after the reply and adds ``dialogs`` and
+    ``dialog_warning`` to it, so a script that "succeeded" into a dialog says so.
+    """
     message = json.dumps({"op": op, **payload}) + "\n"
     try:
         client = socket.create_connection((HOST, port()), timeout=timeout)
@@ -125,12 +145,28 @@ def request(op: str, timeout: float = QUERY_TIMEOUT, **payload: Any) -> dict:
         raise BridgeError(how_to_connect()) from exc
 
     chunks: list[bytes] = []
+    deadline = time.monotonic() + timeout
+    seen = 0
     with client:
-        client.settimeout(timeout)
+        client.settimeout(min(timeout, DIALOG_POLL))
         try:
             client.sendall(message.encode("utf-8"))
             while not chunks or b"\n" not in chunks[-1]:
-                chunk = client.recv(65536)
+                try:
+                    chunk = client.recv(65536)
+                except TimeoutError:
+                    if time.monotonic() >= deadline:
+                        raise
+                    found = dialogs.showing()
+                    seen = seen + 1 if found else 0
+                    if seen >= DIALOG_POLLS:
+                        raise BridgeError(
+                            dialogs.describe(found)
+                            + f" md-mcp stopped waiting for {op!r} because of it; the "
+                            "request is still inside MD and finishes once the dialog is "
+                            "dismissed, so read the scene back before retrying anything."
+                        ) from None
+                    continue
                 if not chunk:
                     break
                 chunks.append(chunk)
@@ -215,6 +251,12 @@ def request(op: str, timeout: float = QUERY_TIMEOUT, **payload: Any) -> dict:
                 else ""
             )
         )
+    if look_after:
+        time.sleep(DIALOG_SETTLE)
+        found = dialogs.showing()
+        if found:
+            reply["dialogs"] = found
+            reply["dialog_warning"] = dialogs.describe(found)
     return reply
 
 
@@ -242,6 +284,7 @@ def run_script(
     return request(
         "run",
         timeout=RUN_TIMEOUT if timeout is None else timeout,
+        look_after=True,
         source=source,
         name=name,
     )
@@ -259,9 +302,13 @@ MD_MODULES = (
 )
 
 
-def _printed_reply(source: str, timeout: float) -> tuple[Any, dict]:
+def _printed_reply(
+    source: str, timeout: float, look_after: bool = False
+) -> tuple[Any, dict]:
     """Run a snippet that prints one JSON document: what it printed, and the reply."""
-    reply = request("run", timeout=timeout, source=source, name="<md-mcp query>")
+    reply = request(
+        "run", timeout=timeout, look_after=look_after, source=source, name="<md-mcp query>"
+    )
     output = reply.get("output", "")
     try:
         return json.loads(output), reply
@@ -306,8 +353,11 @@ def call(function: str, args: list | None = None) -> Any:
     return call_checked(function, args)[0]
 
 
-def call_checked(function: str, args: list | None = None) -> tuple[Any, list | None]:
-    """:func:`call`, plus the listener's check of any file the call said it wrote.
+def call_checked(
+    function: str, args: list | None = None
+) -> tuple[Any, list | None, list]:
+    """:func:`call`, plus the listener's check of any file the call said it wrote, and
+    any modal dialog MD was showing just after it (the third item, empty if none).
 
     The second item is the reply's ``writes``: one record per ``Export*`` call that
     named or returned a path, saying which of those paths exist. ``None`` means the
@@ -320,10 +370,10 @@ def call_checked(function: str, args: list | None = None) -> tuple[Any, list | N
         f"print(json.dumps({{'result': {module}.{name}(*_args)}}, default=repr))\n"
     )
     try:
-        printed, reply = _printed_reply(source, RUN_TIMEOUT)
+        printed, reply = _printed_reply(source, RUN_TIMEOUT, look_after=True)
     except BridgeError as exc:
         raise _explained(function, exc) from exc
-    return printed["result"], reply.get("writes")
+    return printed["result"], reply.get("writes"), reply.get("dialogs") or []
 
 
 #: ``Export*`` calls that write nothing, so are never checked -- mirrors ``NOT_WRITES``

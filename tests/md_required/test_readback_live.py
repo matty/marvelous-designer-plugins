@@ -226,3 +226,55 @@ def test_a_checkpoint_round_trips_and_says_where_mds_project_points(
 
     assert restored["matches_checkpoint"], restored["differences"]
     assert [p["name"] for p in restored["scene"]["pieces"]] == ["square"]
+
+
+# -------------------------------------------------------------------- modal dialogs
+
+#: Presses OK in any dialog an MD window owns, through UI Automation from outside MD --
+#: measured 2026-10-11 to close the "abnormal seamlines" dialog and release the bridge.
+#: Here so that the test cleans up after itself instead of waiting for a person.
+DISMISS = r"""
+Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
+$A = [System.Windows.Automation.AutomationElement]
+$cond = New-Object System.Windows.Automation.PropertyCondition($A::ProcessIdProperty, [int]$args[0])
+foreach ($w in $A::RootElement.FindAll([System.Windows.Automation.TreeScope]::Descendants, $cond)) {
+    if ($w.Current.ControlType -eq [System.Windows.Automation.ControlType]::Button -and $w.Current.Name -eq "OK") {
+        $w.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke(); "pressed"
+    }
+}
+"""
+
+
+def dismiss_dialogs(pid: int) -> str:
+    import subprocess
+
+    return subprocess.run(
+        ["powershell.exe", "-NoProfile", "-Command", DISMISS.replace("$args[0]", str(pid))],
+        capture_output=True, text=True, timeout=60,
+    ).stdout
+
+
+def test_a_modal_dialog_is_reported_in_seconds(empty) -> None:
+    import time
+
+    from md_mcp import dialogs
+
+    pid = bridge.ping()["pid"]
+    bridge.run_script(SQUARE, name="square.py")
+    started = time.monotonic()
+    try:
+        # Sewing an edge to itself is the measured way to summon a modal dialog.
+        with pytest.raises(bridge.BridgeError) as failure:
+            bridge.run_script(
+                "import pattern_api\npattern_api.AddSeamlinePairGroup(0, 0, 0, 0, True, False)",
+                timeout=120,
+            )
+        assert time.monotonic() - started < 10, "md-mcp waited for the timeout"
+        assert "modal dialog" in str(failure.value)
+        assert dialogs.showing(), "the dialog was not seen from outside MD"
+    finally:
+        dismiss_dialogs(pid)
+    deadline = time.monotonic() + 10
+    while dialogs.showing() and time.monotonic() < deadline:
+        time.sleep(0.2)
+    assert bridge.ping()["ok"]

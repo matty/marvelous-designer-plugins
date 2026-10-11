@@ -174,6 +174,25 @@ thread serving the bridge. Everything stops until somebody dismisses it, and res
 they do. Nothing times out at MD's end, so a bridge call that never returns is worth
 *looking at MD* for before it is worth debugging.
 
+**And the seam is made anyway.** Measured 2026-10-11 on 2026.0.315: once the dialog was
+dismissed, `AddSeamlinePairGroup` returned `True` and the seam group was counted, so the
+reply alone reads as success. `md_seams` reports it ("sewn to an overlapping part of
+itself").
+
+**The dialog can be seen, and closed, from outside MD** (same day, same dialog):
+
+| | |
+| --- | --- |
+| Win32 | A visible top-level window, class `Qt6103QWindow`, **owned by MD's main window** (`Qt6103QWindowIcon`) and titled the same; the main window is **disabled** while it is up and enabled once it closes |
+| UI Automation | Only an "Information" label and an "OK" button — **not the message text** |
+| Dismissal | Invoking that OK button through UI Automation from another process closed the dialog, and the blocked request finished |
+
+md-mcp uses the first row: a request waiting on MD looks once a second, and abandons the
+reply (not the work) once a dialog has been up for two looks — measured giving up after
+2.0 s where it would have waited 120 — and `run_md_python`, `md_call` and `md_status`
+report a dialog showing after a reply. It names the dialog and cannot quote it. It does
+not dismiss one; the live test does, to clean up after itself.
+
 ### Seams can be read back per piece, not just counted
 
 `GetSeamlinePairGroupListInPattern(_pattern)` returns the seam group ids that touch one
