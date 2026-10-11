@@ -51,7 +51,7 @@ def test_a_checkpoint_saves_the_scene_and_a_record_of_it(md, server, folder) -> 
 
     path = pathlib.Path(saved["path"])
     assert path.parent == folder and path.is_file()
-    assert path.name.endswith("-before-sewing.zprj")
+    assert path.name.endswith("-before-sewing.zpac")
     assert saved["scene"]["pieces"] == [{"index": 0, "name": "front"}]
     record = json.loads(path.with_suffix(".json").read_text(encoding="utf-8"))
     assert record["label"] == "before sewing" and record["scene"]["pattern_count"] == 1
@@ -99,16 +99,48 @@ def test_a_restore_that_does_not_match_the_record_says_how(md, server) -> None:
     assert any("seam_group_count" in line for line in restored["differences"])
 
 
-def test_a_checkpoint_that_repoints_mds_project_is_a_warning(md, server) -> None:
-    # Unmeasured in MD: if saving a copy makes MD treat the copy as its open project,
-    # the user's next Save writes over the checkpoint, not their work.
+def test_a_checkpoint_leaves_the_project_and_its_unsaved_flag_alone(md, server) -> None:
+    # Measured 2026-10-11: ExportZPrj re-points MD's project at the copy, ExportZPac
+    # does not, and both clear the unsaved flag -- which md_checkpoint sets again, so MD
+    # still asks the user to save before closing.
     md.project_path = "C:/work/cape.zprj"
-    md.zprj_repoints_project = True
+    bridge.run_script(SQUARE.format(name="front"))
+    assert md.unsaved
+
+    saved = payload(call(server, "md_checkpoint"))
+
+    assert md.project_path == "C:/work/cape.zprj"
+    assert md.unsaved, "the checkpoint left MD thinking there was nothing to save"
+    assert saved["project"]["after"]["unsaved"] is True
+    assert "warning" not in saved
+    assert [c[0] for c in md.calls if c[0].startswith("Export")] == ["ExportZPac"]
+
+
+def test_a_checkpoint_that_repoints_mds_project_is_a_warning(md, server) -> None:
+    # Should a later MD re-point its project on ExportZPac too, the user must be told:
+    # their next Save would write over the checkpoint, not their work.
+    md.project_path = "C:/work/cape.zprj"
+    md.zpac_repoints_project = True
 
     saved = payload(call(server, "md_checkpoint"))
 
     assert "C:/work/cape.zprj" in saved["warning"]
-    assert saved["project"]["after"]["value"] == saved["path"]
+
+
+def test_a_restore_keeps_the_avatar_and_marks_the_scene_unsaved(md, server) -> None:
+    # A .zpac carries the garment, not the avatar; ImportZpac keeps the open one.
+    md.avatars = ["Nardo"]
+    bridge.run_script(SQUARE.format(name="front"))
+    payload(call(server, "md_checkpoint", {"label": "garment"}))
+    md.avatars = ["Someone else"]
+    bridge.run_script(SQUARE.format(name="extra"))
+
+    restored = payload(call(server, "md_restore", {"checkpoint": "garment"}))
+
+    assert restored["scene"]["avatars"] == ["Someone else"]
+    assert [p["name"] for p in restored["scene"]["pieces"]] == ["front"]
+    assert restored["matches_checkpoint"] is True, restored["differences"]
+    assert md.unsaved, "a restored garment differs from the saved file and must say so"
 
 
 def test_no_file_means_no_checkpoint_and_a_reason_not_to_go_on(md, server) -> None:

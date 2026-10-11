@@ -1,9 +1,11 @@
-"""Checkpoints: the scene saved to a .zprj before a change, and found again to restore.
+"""Checkpoints: the garment saved before a change, and found again to restore.
 
-MD's API has no undo, and nothing removes a seam, so restoring a saved scene is the only
-way back from a mistake. A ``.zprj`` round trip was measured intact on 2026.0.315 (56
-pieces: names, fabric indices, layers and all 133 seam groups came back), which makes it
-the format for this.
+MD's API has no undo, and nothing removes a seam, so restoring a saved garment is the
+only way back from a mistake. Checkpoints are ``.zpac``, not ``.zprj``: measured on
+2026.0.315 (2026-10-11), every form of ``ExportZPrj`` re-points MD's open project at the
+copy, so the user's next Save would go over the checkpoint, while ``ExportZPac`` leaves
+the project alone. A ``.zpac`` carries the garment -- pieces and seams came back through
+``ImportZpac`` -- and not the avatar, which ``ImportZpac`` leaves as it is.
 
 This module is the md-mcp side only -- where checkpoints live, what they are called,
 the record kept beside each, which ones are kept, and which one a name refers to. MD
@@ -23,7 +25,7 @@ from typing import Any
 #: named -- nothing else in the folder is touched.
 KEEP = 30
 
-_NAME = re.compile(r"^(\d{8}-\d{6})(?:-([A-Za-z0-9_-]+))?\.zprj$")
+_NAME = re.compile(r"^(\d{8}-\d{6})(?:-([A-Za-z0-9_-]+))?\.zpac$")
 
 
 def folder() -> pathlib.Path:
@@ -46,10 +48,10 @@ def new_path(label: str = "", now: _dt.datetime | None = None) -> pathlib.Path:
     stamp = (now or _dt.datetime.now()).strftime("%Y%m%d-%H%M%S")
     tag = slug(label)
     base = f"{stamp}-{tag}" if tag else stamp
-    path = folder() / f"{base}.zprj"
+    path = folder() / f"{base}.zpac"
     number = 2
     while path.exists():
-        path = folder() / f"{base}-{number}.zprj"
+        path = folder() / f"{base}-{number}.zpac"
         number += 1
     return path
 
@@ -126,15 +128,22 @@ def resolve(name: str) -> dict | None:
         ):
             return entry
     candidate = pathlib.Path(name)
-    if candidate.suffix.lower() == ".zprj" and candidate.is_file():
+    if candidate.suffix.lower() in (".zpac", ".zprj") and candidate.is_file():
         return {"path": str(candidate), "label": "", "record": "not made by md_checkpoint"}
     return None
 
 
-def compare(saved: dict, now: dict) -> list[str]:
-    """How the scene after a restore differs from the record taken with the checkpoint."""
+def compare(saved: dict, now: dict, garment_only: bool = True) -> list[str]:
+    """How the scene after a restore differs from the record taken with the checkpoint.
+
+    ``garment_only`` leaves the avatar out: a .zpac carries none, and its import keeps
+    whatever avatar is open.
+    """
     differences = []
-    for key in ("pattern_count", "seam_group_count", "avatars", "fabrics"):
+    keys = ["pattern_count", "seam_group_count", "fabrics"]
+    if not garment_only:
+        keys.append("avatars")
+    for key in keys:
         if key in saved and saved.get(key) != now.get(key):
             differences.append(f"{key}: saved {saved.get(key)!r}, now {now.get(key)!r}")
     if "pieces" in saved:

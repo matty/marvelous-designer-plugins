@@ -596,8 +596,30 @@ drawn into the contour, which is what a flat-pattern drafter does anyway.
 `ImportZprj(path, ApiTypes.ImportZPRJOption())` returned identical piece count and
 names, identical per-piece fabric indices and simulation layers, an identical seam-group
 count (133) and an identical `GetFabricStyleNameList()`. The reimport replaces the open
-scene rather than adding to it, and took ~2s. Nothing measurable was lost, so the format
-is safe as the checkpoint between sessions.
+scene rather than adding to it, and took ~2s. Nothing measurable was lost.
+
+**But saving a `.zprj` hijacks MD's open project.** Measured 2026-10-11 on 2026.0.315,
+with `utility_api.GetProjectFilePath()` (which answers `"NULL"` for a project never
+saved), `GetProjectName()` and `CheckZPRJForUnsavedChanges()` read after each call:
+
+| Call | Project path afterwards | Unsaved flag afterwards |
+| --- | --- | --- |
+| `ExportZPrj(path)`, `ExportZPrj(path, False)`, `ExportZPrj(path, True)` | the copy | cleared |
+| `ExportZPac(path)` | unchanged — a saved project kept its path, an unsaved one stayed `NULL` | cleared (the name changes for an unsaved project) |
+| `ImportZpac(path, ImportExportOption())` | unchanged | cleared |
+
+So after an `ExportZPrj` "copy", the user's next Save writes over the copy and not their
+project; there is no setter to put the path back. **A `.zpac` is the garment only** —
+after `NewProject` an imported one brought back pieces and seams and no avatar — and
+**`ImportZpac` replaces the garment and keeps the open avatar**: imported onto a scene
+holding an extra piece and Genesis 8, the extra piece went and the avatar stayed. That
+makes `.zpac` the checkpoint format (`md_checkpoint`).
+
+**Every save of a copy clears the unsaved flag**, so MD would close without asking
+although the user's own file lacks their latest work. Renaming a piece does not set the
+flag again, even to a different name and back (an earlier reading that it did was a
+coincidence). Creating a piece sets it, and deleting that piece afterwards leaves it set
+with the garment exactly as it was — which is what `md_checkpoint` and `md_restore` do.
 
 **As a document** — `pattern_api.ExportPatternJSON(_path)` / `ImportPatternJSON(_path)`.
 Measured round trip: two sewn panels exported, `NewProject`, re-imported — both pieces
@@ -702,7 +724,10 @@ captures of one draped garment at one camera position produced sixteen different
 SHA-256s, and repeated `Refresh3DWindow` calls do not converge. But the instability is
 not unconditional: measured 2026-09-19 on 2026.0.315, three captures of an empty scene
 were byte-identical, three of two sewn 360 × 500 mm panels *before* simulating were
-byte-identical, and the same three after `Simulate(400)` were not.
+byte-identical, and the same three after `Simulate(400)` were not. That was the old,
+never-returning listener. Under the timer listener (2026-10-11) the flat captures were
+still identical, and the draped ones were identical in two runs out of three and
+differed in the third.
 
 So a hash is evidence in neither direction — it reports "changed" for a draped scene
 nobody touched, and "unchanged" is only ever as good as how little is in the scene.

@@ -328,9 +328,10 @@ NOTES: dict[str, str] = {
         "[['C:/.../shot.png']], not a path. Hashing one is evidence in neither "
         "direction: 16 captures of a draped garment at a fixed camera gave 16 digests, "
         "and repeated Refresh3DWindow never converges, while three captures of an empty "
-        "scene and three of two sewn panels before simulating were byte-identical. Cloth "
-        "makes the bytes move; stable bytes do not mean the scene held still. Compare "
-        "the pictures."
+        "scene and three of two sewn panels before simulating were byte-identical. "
+        "Under the timer listener (2026-10-11) draped captures were identical in two "
+        "runs of three. Either way a hash says nothing about the scene: compare the "
+        "pictures."
     ),
     "export_api.ExportTurntableImages": (
         "Returns [] and writes no files. To get views round a garment, step "
@@ -427,9 +428,32 @@ NOTES: dict[str, str] = {
         "clean: names, seam groups and a 360mm edge all came back exact."
     ),
     "export_api.ExportZPrj": (
-        "The checkpoint that survives a round trip: a 56-piece scene read back through "
-        "ImportZprj with identical names, fabric indices, layers, seam-group count and "
-        "fabric list. Prefer the W twin for paths with non-ASCII characters."
+        "RE-POINTS MD'S OPEN PROJECT AT THE FILE, in all three forms, and clears the "
+        "unsaved flag: after a 'copy', the user's next Save writes over the copy, and "
+        "nothing sets the path back (measured 2026-10-11). For a checkpoint use "
+        "ExportZPac, or md_checkpoint. The file itself round-trips: a 56-piece scene "
+        "read back through ImportZprj with identical names, fabric indices, layers, "
+        "seam-group count and fabric list."
+    ),
+    "export_api.ExportZPac": (
+        "The garment only -- pieces, seams, fabrics, no avatar -- and it leaves MD's "
+        "open project path alone (measured 2026-10-11), unlike ExportZPrj. It still "
+        "clears the unsaved flag, so MD would close without asking; creating and "
+        "deleting a piece sets the flag again. md_checkpoint does both."
+    ),
+    "import_api.ImportZpac": (
+        "Replaces the garment and keeps the open avatar: imported onto a scene with an "
+        "extra piece and an avatar, the extra piece went and the avatar stayed (measured "
+        "2026-10-11). Clears the unsaved flag. Needs an ApiTypes.ImportExportOption()."
+    ),
+    "utility_api.CheckZPRJForUnsavedChanges": (
+        "MD's unsaved-changes flag. Every save of a copy (ExportZPrj, ExportZPac) and "
+        "ImportZpac clears it. Renaming a piece does not set it again; creating a piece "
+        "does (measured 2026-10-11)."
+    ),
+    "utility_api.GetProjectFilePath": (
+        "Answers 'NULL' for a project never saved. ExportZPrj changes it to the file it "
+        "wrote; ExportZPac does not (measured 2026-10-11). There is no setter."
     ),
     "import_api.ImportZprj": (
         "Replaces the open scene rather than adding to it, and takes an "

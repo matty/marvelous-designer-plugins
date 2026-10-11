@@ -887,37 +887,47 @@ STOP_ENTRY = "Stop MCP"
 STOP_SCRIPT = "md_mcp_stop.py"
 
 
-def register_plugin(listener=None, marker=None):
-    """Put Start MCP and Stop MCP in MD's Plugin tab. Returns lines saying what happened.
+def _plugin_list_path():
+    """MD's own list of Plugin tab entries, which it rewrites as it exits (2026-10-11)."""
+    public = os.environ.get("PUBLIC") or "C:\\Users\\Public"
+    return os.path.join(public, "Documents", "MarvelousDesigner", "Plugins",
+                        "pluginSettings.json")
 
-    **Never raises.** This runs on the way to serving, and a bridge with no buttons is
-    worth more than neither.
 
-    Asks once per (path, name) rather than once per session: MD does not say whether it
-    already had a script, so asking every time is how the Plugin tab fills up with
-    duplicates that nothing can remove. Delete the marker file to ask again.
+def _registered_in_md(listing=None):
+    """{normalised path: title} for every entry in MD's plugin list. Never raises.
 
-    **The path comes first: `RegisterPythonScript(path, title)`.** Measured on MD
-    2026.0.315, 2026-10-11, from MD's own log
-    (``C:\\Users\\Public\\Documents\\MarvelousDesigner\\New Assets\\api_plugin_log.txt``):
-    called as (title, path) it reported "the script path is invalid: <MD's install
-    folder>/Start MCP" -- the title, read as a relative path. Every refusal this file
-    used to blame on running inside another script is explained by that. Called as
-    (path, title) MD read the path, and declined a path it already had ("already
-    registered"). It is declared `-> bool`, so the bool is checked and a False is never
-    recorded: an entry written down as registered is one nobody ever offers again.
+    ``m_PlugInFileName`` holds the path with forward slashes. A list that cannot be read
+    is an empty one, which only means MD gets asked -- the old behaviour.
     """
+    try:
+        with open(listing or _plugin_list_path(), encoding="utf-8") as handle:
+            plugins = json.load(handle).get("plugins", [])
+    except (OSError, ValueError, AttributeError):
+        return {}
+    found = {}
+    for plugin in plugins if isinstance(plugins, list) else []:
+        if isinstance(plugin, dict) and plugin.get("m_PlugInFileName"):
+            path = os.path.normcase(os.path.normpath(plugin["m_PlugInFileName"]))
+            found[path] = plugin.get("m_PlugInTitle", "")
+    return found
+
+
+def _register(listener=None, marker=None, listing=None):
+    """Register what is missing. Returns (lines, news): what happened, and whether any of
+    it is new enough to be worth a message box rather than a printed line."""
     listener = os.path.abspath(listener) if listener else _this_file()
     if listener is None:
-        return (
+        return [
             "md-mcp: not registering anything -- this was run from source text with no "
             "__file__, so there is no path to give MD. Run the two-line bootstrap from "
             "the README instead of pasting the file's contents."
-        )
+        ], True
 
     entries = [(START_ENTRY, listener)]
     stopper = os.path.join(os.path.dirname(listener), STOP_SCRIPT)
     lines = []
+    news = False
     if os.path.isfile(stopper):
         entries.append((STOP_ENTRY, stopper))
     else:
@@ -925,18 +935,37 @@ def register_plugin(listener=None, marker=None):
             "md-mcp: no {} beside {}, so there is no Stop MCP entry to register; "
             "reinstall the plugin to get one.".format(STOP_SCRIPT, listener)
         )
+        news = True
 
     marker = marker or _marker_path()
     done = _read_marker(marker)
+    in_md = _registered_in_md(listing)
     # The wide form for the path: Windows user directories routinely contain non-ASCII
     # characters, and an install is under the user's own profile.
     register = getattr(
         utility_api, "RegisterPythonScriptW", utility_api.RegisterPythonScript
     )
-    added = []
+    added, present, changed = [], [], False
     for name, path in entries:
         key = "{} :: {}".format(os.path.normcase(path), name)
+        title = in_md.get(os.path.normcase(os.path.normpath(path)))
+        if title is not None:
+            # MD declines a path it already has, whatever the title, so asking again
+            # only produces a refusal. It is there: note it and move on.
+            present.append("{} (as {!r})".format(name, title) if title != name else name)
+            if done.get(key, {}).get("declined") or key not in done:
+                done[key] = {"name": name, "path": path, "title_in_md": title,
+                             "plugin_version": __version__}
+                changed = True
+            continue
         if key in done:
+            if done[key].get("declined"):
+                lines.append(
+                    "md-mcp: {} is still not in the Plugin tab; MD declined it before ({}). "
+                    "Add it by hand -- Plug-in Manager > + ADD > {} -- or delete {} to "
+                    "ask MD again.".format(name, done[key]["declined"], path, marker))
+            else:
+                present.append(name)
             continue
         accepted, why = _ask_md(register, name, path)
         if not accepted:
@@ -947,23 +976,52 @@ def register_plugin(listener=None, marker=None):
                 "the entry is called. To add it by hand: Plugin tab > Plug-in Manager > "
                 "+ ADD > {}".format(why, path)
             )
+            # Remembered, so the refusal is reported once and not in a box every session.
+            done[key] = {"name": name, "path": path, "declined": why,
+                         "plugin_version": __version__}
+            changed = True
+            news = True
             continue
         done[key] = {"name": name, "path": path, "plugin_version": __version__}
         added.append(name)
+        changed = True
+        news = True
 
-    if added:
+    if changed:
         complaint = _write_marker(marker, done)
-        lines.insert(0, "md-mcp: added {} to MD's Plugin tab.".format(
-            " and ".join(repr(name) for name in added)))
         if complaint:
             lines.append(complaint)
-    elif not lines:
-        lines.append(
-            "md-mcp: {} already in MD's Plugin tab (delete {} to ask MD again)".format(
-                " and ".join(repr(name) for name, _ in entries), marker
-            )
-        )
-    return "\n".join(lines)
+    if added:
+        lines.insert(0, "md-mcp: added {} to MD's Plugin tab.".format(
+            " and ".join(repr(name) for name in added)))
+    if present:
+        lines.append("md-mcp: {} already in MD's Plugin tab.".format(" and ".join(present)))
+    return lines, news
+
+
+def register_plugin(listener=None, marker=None, listing=None):
+    """Put Start MCP and Stop MCP in MD's Plugin tab. Returns lines saying what happened.
+
+    **Never raises.** This runs on the way to serving, and a bridge with no buttons is
+    worth more than neither.
+
+    **MD's own list is read first** (``Plugins\\pluginSettings.json`` under Public
+    Documents): MD declines a path it already has, whatever the title, so an entry
+    whose script is already there -- under any title -- counts as registered and MD is
+    not asked. Otherwise MD is asked once per (path, name); a refusal is remembered in
+    the marker file and reported once, not in a box every session. Delete the marker
+    file to ask again.
+
+    **The path comes first: `RegisterPythonScript(path, title)`.** Measured on MD
+    2026.0.315, 2026-10-11, from MD's own log
+    (``C:\\Users\\Public\\Documents\\MarvelousDesigner\\New Assets\\api_plugin_log.txt``):
+    called as (title, path) it reported "the script path is invalid: <MD's install
+    folder>/Start MCP" -- the title, read as a relative path. Every refusal this file
+    used to blame on running inside another script is explained by that. It is
+    declared `-> bool`, so the bool is checked and a False is never recorded as a
+    registration.
+    """
+    return "\n".join(_register(listener, marker, listing)[0])
 
 
 def _ask_md(call, name, path):
@@ -984,10 +1042,11 @@ def _ask_md(call, name, path):
 
 def main():
     """What Start MCP runs: register both entries once, start serving, and return."""
-    registered = ""
+    registered, news = [], False
     if os.environ.get("MD_MCP_NO_REGISTER") != "1":
-        registered = register_plugin()
-        print(registered)
+        registered, news = _register()
+        for line in registered:
+            print(line)
     was_running = running() is not None
     try:
         state = start()
@@ -1006,8 +1065,9 @@ def main():
     # routine success is printed and nothing more: a modal box is a click every session,
     # and a dialog on screen is exactly what md-mcp warns about. md_status confirms the
     # bridge is up.
-    if registered and "already in MD's Plugin tab" not in registered:
-        _report(message + "\n\n" + registered.replace("md-mcp: ", ""))
+    if news:
+        _report(message + "\n\n" + "\n".join(
+            line.replace("md-mcp: ", "") for line in registered))
     else:
         print("md-mcp: " + message)
 

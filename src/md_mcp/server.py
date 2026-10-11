@@ -650,26 +650,29 @@ def build_server() -> MCPServer:
     @server.tool()
     @_reportable
     def md_checkpoint(label: str = "") -> dict:
-        """Save the open scene to a checkpoint, so it can be put back with md_restore.
+        """Save the garment to a checkpoint, so it can be put back with md_restore.
 
         MD's API has no undo and nothing removes a seam, so take one before any change
-        you might want to take back -- sewing above all. Saved as a .zprj under
-        %LOCALAPPDATA%\\md-mcp\\checkpoints (MD_MCP_CHECKPOINTS moves it), with a record
-        of what the scene held; the newest 30 are kept.
+        you might want to take back -- sewing above all. Saved as a .zpac (the garment:
+        pieces, seams, fabrics -- not the avatar) under %LOCALAPPDATA%\\md-mcp\\checkpoints
+        (MD_MCP_CHECKPOINTS moves it), with a record of what the scene held; the newest
+        30 are kept. Not a .zprj, because saving one re-points MD's open project at the
+        copy, so the user's next Save would go over the checkpoint instead of their work
+        (measured on 2026.0.315). Saving any copy clears MD's unsaved-changes flag; this
+        sets it again, so MD still asks the user to save before closing.
 
         label: a few words to find it by later, e.g. "before lining seams".
 
-        Returns path, label, scene (pieces, seam groups, avatars, fabrics), project
-        (MD's open-project path before and after the save), recent checkpoints, and a
-        warning if saving re-pointed MD's open project at the checkpoint -- in which case
-        the user's next Save would write over the checkpoint, not their work. Fails, and
-        says not to go on, if MD wrote no file.
+        Returns path, label, scene (pieces, seam groups, avatars, fabrics), project (MD's
+        open-project path, name and unsaved flag before and after), and recent
+        checkpoints, with a warning if MD's project path or unsaved flag still changed.
+        Fails, and says not to go on, if MD wrote no file.
         """
         path = checkpoints.new_path(label)
         saved, scene = bridge.checkpoint(str(path))
         if not saved.get("bytes"):
             raise bridge.BridgeError(
-                f"No checkpoint was written: ExportZPrj answered {saved.get('returned')!r} "
+                f"No checkpoint was written: ExportZPac answered {saved.get('returned')!r} "
                 f"and {path} is missing or empty. Do not make the change this was for "
                 "until a checkpoint exists."
             )
@@ -685,13 +688,20 @@ def build_server() -> MCPServer:
             "scene": entry["scene"],
             "project": {"before": before, "after": after},
         }
-        if "value" in before and "value" in after and before["value"] != after["value"]:
-            result["warning"] = (
+        warnings = []
+        if "path" in before and "path" in after and before["path"] != after["path"]:
+            warnings.append(
                 f"Saving the checkpoint re-pointed MD's open project from "
-                f"{before['value']!r} to {after['value']!r}. A Save in MD now writes over "
-                "the checkpoint, not the original project -- tell the user before they "
-                "save, and use Save As to put it back."
+                f"{before['path']!r} to {after['path']!r}. A Save in MD now writes over the "
+                "checkpoint, not the original project -- tell the user before they save."
             )
+        if before.get("unsaved") and not after.get("unsaved"):
+            warnings.append(
+                "MD no longer flags unsaved changes, so it would close without asking -- "
+                "tell the user to save their project before closing MD."
+            )
+        if warnings:
+            result["warning"] = " ".join(warnings)
         pruned = checkpoints.prune()
         if pruned:
             result["pruned"] = len(pruned)
@@ -704,16 +714,19 @@ def build_server() -> MCPServer:
     @server.tool()
     @_reportable
     def md_restore(checkpoint: str = "latest") -> dict:
-        """Replace the open scene with a checkpoint. DISCARDS WHATEVER IS OPEN NOW.
+        """Put a checkpoint's garment back. DISCARDS THE GARMENT THAT IS OPEN NOW.
 
         checkpoint: "latest" (the default), a label given to md_checkpoint, a checkpoint
-            file name, or a path to any .zprj.
+            file name, or a path to any .zpac or .zprj.
 
-        Imports the .zprj, which replaces the scene, then reads the scene back and
-        compares it with the record taken when the checkpoint was saved. Returns
-        restored (the path), scene, matches_checkpoint and differences. Piece indices
-        are those of the checkpoint, not of the scene that was replaced -- look pieces up
-        by name again before the next call that takes an index.
+        A .zpac (what md_checkpoint saves) replaces the garment and keeps the avatar that
+        is open. A .zprj replaces everything, avatar included, and re-points MD's open
+        project at that file. Afterwards MD's unsaved-changes flag is set, since the
+        scene no longer matches the user's saved file. Returns restored (the path),
+        scene, matches_checkpoint and differences from the record kept when the
+        checkpoint was saved (the avatar is not compared for a .zpac). Piece indices are
+        the checkpoint's, not those of the garment that was replaced -- look pieces up by
+        name again before the next call that takes an index.
         """
         entry = checkpoints.resolve(checkpoint)
         if entry is None:
@@ -727,14 +740,16 @@ def build_server() -> MCPServer:
                    f"There are none in {checkpoints.folder()} yet.")
             )
         loaded, scene = bridge.restore(entry["path"])
+        garment_only = not entry["path"].lower().endswith(".zprj")
         result: dict[str, Any] = {
             "restored": entry["path"],
             "label": entry.get("label", ""),
             "returned": loaded.get("returned"),
             "scene": scene,
+            "project_after": loaded.get("project_after"),
         }
         if "scene" in entry:
-            differences = checkpoints.compare(entry["scene"], scene)
+            differences = checkpoints.compare(entry["scene"], scene, garment_only)
             result["matches_checkpoint"] = not differences
             result["differences"] = differences
         else:

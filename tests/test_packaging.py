@@ -283,10 +283,30 @@ def test_the_packaged_stop_entry_stops_the_packaged_listener(
 
 
 @pytest.fixture
-def listener(monkeypatch):
-    """The listener loaded against a fake MD, with nothing bound and nothing serving."""
+def listener(monkeypatch, tmp_path):
+    """The listener loaded against a fake MD, with nothing bound and nothing serving.
+
+    PUBLIC points at the test's folder, so MD's real plugin list -- which the listener
+    reads before asking MD anything -- is never consulted here.
+    """
+    monkeypatch.setenv("PUBLIC", str(tmp_path / "public"))
     with fake_md(monkeypatch) as host:
         yield host, load_listener({})
+
+
+def write_md_plugin_list(tmp_path, *paths: str) -> None:
+    """MD's pluginSettings.json, in the shape measured on 2026.0.315."""
+    folder = tmp_path / "public" / "Documents" / "MarvelousDesigner" / "Plugins"
+    folder.mkdir(parents=True, exist_ok=True)
+    plugins = [
+        {"m_AddingPositionIndex": 1, "m_BaseMenuTreeByObjectName": "Plugins / Plug-in",
+         "m_PlugInFileName": path.replace("\\", "/"), "m_PlugInIconFileName": "",
+         "m_PlugInTitle": pathlib.Path(path).stem, "m_SourcePath": path,
+         "m_SourceType": "script"}
+        for path in paths
+    ]
+    (folder / "pluginSettings.json").write_text(
+        json.dumps({"plugins": plugins, "version": 2}), encoding="utf-8")
 
 
 def _register(namespace, tmp_path, **kwargs):
@@ -322,19 +342,39 @@ def test_registering_twice_asks_md_once(listener, tmp_path) -> None:
     assert "already in MD's Plugin tab" in message
 
 
-def test_an_entry_md_declines_is_reported_and_not_recorded(listener, tmp_path) -> None:
+def test_a_refusal_is_reported_once_and_not_asked_again(listener, tmp_path) -> None:
     # Measured on 2026.0.315: RegisterPythonScript answers False -- registering
-    # nothing, raising nothing -- for an invalid path or one it already has.
-    # Recording that as success means never offering the entry again.
+    # nothing, raising nothing -- for an invalid path or one it already has. Asking
+    # every session put the same refusal in a message box every session.
     host, namespace = listener
     host.registration_result = False
 
-    message = _register(namespace, tmp_path)
+    first = _register(namespace, tmp_path)
+    asked = len([c for c in host.calls if c[0] == "RegisterPythonScript"])
+    second = _register(namespace, tmp_path)
 
     assert host.registered == []
-    assert "would not register" in message
-    assert "Plug-in Manager" in message
-    assert not (tmp_path / "registered.json").exists()
+    assert "would not register" in first and "Plug-in Manager" in first
+    assert len([c for c in host.calls if c[0] == "RegisterPythonScript"]) == asked
+    assert "declined it before" in second and "would not register" not in second
+    record = json.loads((tmp_path / "registered.json").read_text(encoding="utf-8"))
+    assert all(entry.get("declined") for entry in record.values())
+
+
+def test_a_script_already_in_mds_list_is_not_asked_for_under_any_title(
+    listener, tmp_path
+) -> None:
+    # MD declines a path it already has, whatever the title (measured): the existing
+    # md_mcp_listener entry is the Start entry, so asking only produces a refusal.
+    host, namespace = listener
+    write_md_plugin_list(tmp_path, str(LISTENER))
+
+    message = _register(namespace, tmp_path)
+
+    asked = [c[1] for c in host.calls if c[0] == "RegisterPythonScript"]
+    assert asked == [str(LISTENER.with_name("md_mcp_stop.py"))]
+    assert "Start MCP (as 'md_mcp_listener') and Stop MCP" not in message
+    assert "Start MCP (as 'md_mcp_listener')" in message
 
 
 def test_a_refused_registration_costs_a_button_and_not_a_bridge(
@@ -346,8 +386,7 @@ def test_a_refused_registration_costs_a_button_and_not_a_bridge(
     message = _register(namespace, tmp_path)
 
     assert host.registered == []
-    assert "Plug-in Manager" in message
-    assert not (tmp_path / "registered.json").exists()
+    assert "Plug-in Manager" in message and "no such call" in message
 
 
 def test_a_listener_with_no_path_registers_nothing(monkeypatch, tmp_path) -> None:
@@ -392,6 +431,7 @@ def clicked_start(monkeypatch, tmp_path):
     registered there, and a test must never write to the real record.
     """
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.setenv("PUBLIC", str(tmp_path / "public"))
     with fake_md(monkeypatch) as host:
         namespace = load_listener({})
         namespace["_default_timer"] = lambda: namespace["_ThreadTimer"]
@@ -453,3 +493,22 @@ def test_start_mcp_with_the_port_taken_says_so(monkeypatch, tmp_path) -> None:
 
         assert namespace["running"]() is None
         assert any("could not listen" in box for box in host.message_boxes)
+
+
+def test_a_refusal_puts_up_a_box_once_and_not_every_session(monkeypatch, tmp_path) -> None:
+    # What happened on 2026-10-11: MD declined both entries, and every Start MCP click
+    # would have put the same refusal in a box somebody had to dismiss.
+    with clicked_start(monkeypatch, tmp_path) as (host, namespace, port):
+        host.registration_result = False
+        namespace["main"]()
+        _wait_for_ping()
+        assert len(host.message_boxes) == 1 and "would not register" in host.message_boxes[0]
+
+        stop_listener(port)
+        assert _wait_until_silent()
+        host.message_boxes.clear()
+
+        namespace["main"]()
+
+        assert _wait_for_ping()["ok"]
+        assert host.message_boxes == []

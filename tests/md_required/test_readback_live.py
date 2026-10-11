@@ -86,7 +86,7 @@ def test_measure_reads_the_avatar_and_a_piece_in_millimetres(empty) -> None:
     tall = groups[0]["max"][1] - groups[0]["min"][1]
     # Flat and unsimulated, so the cloth is the drafted square, give or take the mesh.
     assert abs(width - 300) < 15 and abs(tall - 300) < 15, groups[0]
-    assert measured["cross_sections"][0]["vertices"] > 0
+    assert measured["cross_sections"]["sections"][0]["vertices"] > 0
 
 
 # ------------------------------------------------------------------------ md_snapshot
@@ -214,9 +214,12 @@ def test_a_checkpoint_round_trips_and_says_where_mds_project_points(
     bridge.run_script(SQUARE, name="square.py")
 
     saved = payload(call(server, "md_checkpoint", {"label": "live"}))
-    # The open question this settles (docs/roadmap.md): does saving a copy re-point
-    # MD's open project at it? Printed so the run records the answer either way.
-    print("project before/after ExportZPrj:", saved["project"], saved.get("warning"))
+    # Measured 2026-10-11: ExportZPrj re-points MD's project at the copy; ExportZPac,
+    # which md_checkpoint uses, does not -- and the unsaved flag a save clears is set
+    # again, so MD still asks before closing.
+    assert saved["project"]["after"]["path"] == saved["project"]["before"]["path"]
+    assert saved["project"]["after"]["unsaved"] is True, saved["project"]
+    assert "warning" not in saved, saved["warning"]
 
     bridge.run_script(SQUARE.replace('"square"', '"extra"'), name="extra.py")
     restored = payload(call(server, "md_restore", {"checkpoint": "live"}))

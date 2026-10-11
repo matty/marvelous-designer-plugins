@@ -113,13 +113,18 @@ class FakeMDHost:
         #: MD's open-project path. Whether ExportZPrj re-points it at the copy is
         #: unmeasured, so both answers can be tested.
         self.project_path = ""
-        self.zprj_repoints_project = False
+        self.zprj_repoints_project = True
+        self.zpac_repoints_project = False
+        #: MD's unsaved-changes flag: set by any change to the garment, cleared by saving
+        #: any copy (measured 2026-10-11).
+        self.unsaved = False
         #: Every file an export actually wrote, so a test can prove they were removed.
         self.written: list[str] = []
 
     # ------------------------------------------------------------ pattern_api
 
     def CreatePatternWithPoints(self, points) -> int:
+        self.unsaved = True
         self.calls.append(("CreatePatternWithPoints", len(points)))
         self.piece_names.append(f"pattern-{len(self.piece_names)}")
         self.shape_counts.append(0)
@@ -128,6 +133,7 @@ class FakeMDHost:
         return len(self.piece_names) - 1
 
     def DeletePatternPiece(self, index: int) -> None:
+        self.unsaved = True
         # Renumbers every later piece, as MD's does.
         self.calls.append(("DeletePatternPiece", index))
         for column in (self.piece_names, self.shape_counts, self.piece_points,
@@ -266,19 +272,58 @@ class FakeMDHost:
         self._write(path, png_bytes(*self.snapshot_size))
         return [[path]]
 
-    #: The scene state a .zprj carries here, so a checkpoint round-trips for real.
+    #: The scene state a .zprj carries here, so a checkpoint round-trips for real; a
+    #: .zpac carries the garment fields only, as MD's was measured to (no avatar).
     _ZPRJ_FIELDS = ("piece_names", "shape_counts", "piece_points", "placements", "seams",
                     "seam_groups", "avatars", "fabrics")
+    _ZPAC_FIELDS = ("piece_names", "shape_counts", "piece_points", "placements", "seams",
+                    "seam_groups", "fabrics")
+
+    def _save(self, path: str, fields: tuple) -> bool:
+        state = {field: getattr(self, field) for field in fields}
+        return self._write(path, json.dumps(state).encode("utf-8"))
+
+    def _load(self, path: str, fields: tuple) -> None:
+        with open(path, encoding="utf-8") as handle:
+            state = json.load(handle)
+        for field in fields:
+            value = state[field]
+            if field == "piece_points":
+                value = [[tuple(point) for point in points] for points in value]
+            elif field == "placements":
+                value = [tuple(place) if place is not None else None for place in value]
+            elif field == "seams":
+                value = [tuple(seam) for seam in value]
+            setattr(self, field, value)
 
     def ExportZPrj(self, path: str) -> bool:
+        # Measured 2026-10-11: re-points MD's project at the copy and clears the
+        # unsaved-changes flag.
         self.calls.append(("ExportZPrj", path))
-        state = {field: getattr(self, field) for field in self._ZPRJ_FIELDS}
-        if self._write(path, json.dumps(state).encode("utf-8")) and self.zprj_repoints_project:
-            self.project_path = path
+        if self._save(path, self._ZPRJ_FIELDS):
+            if self.zprj_repoints_project:
+                self.project_path = path
+            self.unsaved = False
         return True
 
+    def ExportZPac(self, path: str) -> str:
+        # Measured 2026-10-11: leaves the project path alone, and still clears the flag.
+        self.calls.append(("ExportZPac", path))
+        if self._save(path, self._ZPAC_FIELDS):
+            if self.zpac_repoints_project:
+                self.project_path = path
+            self.unsaved = False
+            return path
+        return ""
+
     def GetProjectFilePath(self) -> str:
-        return self.project_path
+        return self.project_path or "NULL"
+
+    def GetProjectName(self) -> str:
+        return os.path.splitext(os.path.basename(self.project_path))[0] or "NULL"
+
+    def CheckZPRJForUnsavedChanges(self) -> bool:
+        return self.unsaved
 
     def ImportZprj(self, *args) -> bool:
         if len(args) < 2:
@@ -291,18 +336,17 @@ class FakeMDHost:
             )
         path = args[0]
         self.calls.append(("ImportZprj", path))
-        with open(path, encoding="utf-8") as handle:
-            state = json.load(handle)
-        for field in self._ZPRJ_FIELDS:
-            value = state[field]
-            if field in ("piece_points",):
-                value = [[tuple(point) for point in points] for points in value]
-            elif field == "placements":
-                value = [tuple(place) if place is not None else None for place in value]
-            elif field == "seams":
-                value = [tuple(seam) for seam in value]
-            setattr(self, field, value)
+        self._load(path, self._ZPRJ_FIELDS)
         self.project_path = path
+        self.unsaved = False
+        return True
+
+    def ImportZpac(self, path: str, option) -> bool:
+        # Measured 2026-10-11: replaces the garment, keeps the open avatar, clears the
+        # unsaved flag.
+        self.calls.append(("ImportZpac", path))
+        self._load(path, self._ZPAC_FIELDS)
+        self.unsaved = False
         return True
 
     def ExportTurntableImages(self, path: str, count: int, width: int, height: int,
@@ -321,6 +365,7 @@ class FakeMDHost:
         self.calls.append(("Refresh3DWindow",))
 
     def SetPatternPieceName(self, index: int, name: str) -> None:
+        self.unsaved = True
         self.calls.append(("SetPatternPieceName", index, name))
         self.piece_names[index] = name
 
@@ -330,6 +375,7 @@ class FakeMDHost:
         return self.shape_counts[index] - 1
 
     def AddSeamlinePairGroup(self, *args) -> bool:
+        self.unsaved = True
         self.calls.append(("AddSeamlinePairGroup", *args))
         if len(args) == 6:
             self.seams.append(tuple(args))
@@ -430,6 +476,7 @@ class FakeMDHost:
             "ExportOBJ",
             "ExportSnapshot3D",
             "ExportZPrj",
+            "ExportZPac",
             "ExportTurntableImages",
         ):
             setattr(export_api, name, getattr(self, name))
@@ -452,7 +499,10 @@ class FakeMDHost:
 
         import_api = types.ModuleType("import_api")
         import_api.ImportZprj = self.ImportZprj
+        import_api.ImportZpac = self.ImportZpac
         utility_api.GetProjectFilePath = self.GetProjectFilePath
+        utility_api.GetProjectName = self.GetProjectName
+        utility_api.CheckZPRJForUnsavedChanges = self.CheckZPRJForUnsavedChanges
 
         fabric_api = types.ModuleType("fabric_api")
         fabric_api.GetFabricStyleNameList = lambda: list(self.fabrics)

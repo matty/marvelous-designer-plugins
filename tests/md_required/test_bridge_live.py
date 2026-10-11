@@ -152,7 +152,11 @@ def test_setcamviewpoint_moves_the_camera_and_setviewpoint_does_not(tmp_path) ->
     def spread(sizes: list[int]) -> float:
         return (max(sizes) - min(sizes)) / max(sizes)
 
-    assert spread(_snapshot_sizes(tmp_path, "SetCamViewPoint")) > 0.10
+    # Six different views make six different pictures, but how different their sizes
+    # are depends on the scene: 44% on a 56-piece garment (2026-09-19), 9% on a few test
+    # panels (2026-10-11). So count distinct pictures rather than set a threshold.
+    moved = _snapshot_sizes(tmp_path, "SetCamViewPoint")
+    assert len(set(moved)) >= 5, f"SetCamViewPoint gave too few distinct views: {moved}"
     assert spread(_snapshot_sizes(tmp_path, "SetViewPoint")) < 0.01
 
 
@@ -183,17 +187,19 @@ print(json.dumps({{"flat": flat, "draped": digests("draped")}}))
 """
 
 
-def test_a_draped_scene_does_not_snapshot_to_the_same_bytes_twice(md, tmp_path) -> None:
+def test_a_snapshot_hash_is_not_evidence_either_way(md, tmp_path) -> None:
     """So that nobody builds change-detection on a hash of the picture.
 
-    Sixteen captures of a draped 56-piece garment at one camera position gave sixteen
-    different digests, and repeated Refresh3DWindow calls do not converge.
+    Measured 2026-09-19 on 2026.0.315, under the old never-returning listener: sixteen
+    captures of a draped 56-piece garment at one camera position gave sixteen different
+    digests, while three captures of an empty scene, and of these two panels *before*
+    simulating, were byte-identical every time.
 
-    It takes cloth to show it, which is why this builds its own scene rather than using
-    whatever is open: measured 2026-09-19 on 2026.0.315, three captures of an empty
-    scene and three of these same two panels *before* simulating were byte-identical
-    every time, and only the draped ones diverged. So a stable hash says nothing either
-    -- there is no direction in which hashing a snapshot is evidence.
+    Measured 2026-10-11 under the timer listener, with this test's own scene: the flat
+    captures were still identical, and the draped ones were identical in two runs out of
+    three and differed in the third. So neither a changed hash nor a stable one says
+    anything about the scene -- compare the pictures. This asserts the part that held
+    both times, and reports the rest.
     """
     result = json.loads(
         bridge.run_script(
@@ -202,7 +208,8 @@ def test_a_draped_scene_does_not_snapshot_to_the_same_bytes_twice(md, tmp_path) 
         )["output"].strip().splitlines()[-1]
     )
 
-    assert len(set(result["draped"])) > 1, "draped bytes were stable; revisit the docs"
+    assert len(set(result["flat"])) == 1, "flat captures differed; revisit the docs"
+    print("distinct digests among 3 draped captures:", len(set(result["draped"])))
 
 
 def test_seam_groups_can_be_listed_per_piece_and_stay_in_range() -> None:

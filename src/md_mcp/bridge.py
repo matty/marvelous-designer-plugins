@@ -1130,54 +1130,97 @@ print(json.dumps(_result))
 '''
 
 
-#: md_checkpoint, inside MD. ExportZPrj to the path md-mcp chose, with MD's idea of its
-#: open project read before and after: if saving a copy re-points MD at the copy, the
-#: user's next Save goes over the checkpoint instead of their work, and they must be
-#: told. Where GetProjectFilePath lives is not measured, so every module is asked.
-_CHECKPOINT = r'''
-import json, os
-import export_api
-_params = json.loads(__MD_MCP_PARAMS__)
+#: What both checkpoint snippets share: MD's open project and its unsaved-changes flag,
+#: and the one way found to set that flag again. Measured on 2026.0.315 (2026-10-11):
+#: every save of a copy -- ExportZPrj in all three forms, ExportZPac, and ImportZpac
+#: too -- clears CheckZPRJForUnsavedChanges, so MD would close without asking although
+#: the user's own file lacks their latest work. Renaming a piece does not set it again,
+#: even to another name; creating a piece does, and deleting it afterwards leaves the
+#: flag set and the garment as it was. The temporary piece is created last, so deleting
+#: it renumbers nothing, and it is found by its own name before anything is deleted.
+_PROJECT_STATE = r'''
+import utility_api, pattern_api
 
 
 def _mdmcp_project():
-    for _module_name in ("utility_api", "export_api", "import_api", "pattern_api"):
-        try:
-            _module = __import__(_module_name)
-        except ImportError:
+    _state = {}
+    for _key, _name in (("path", "GetProjectFilePath"), ("name", "GetProjectName"),
+                        ("unsaved", "CheckZPRJForUnsavedChanges")):
+        _call = getattr(utility_api, _name, None)
+        if _call is None:
+            _state[_key + "_error"] = "this build has no " + _name
             continue
-        _call = getattr(_module, "GetProjectFilePath", None)
-        if _call is not None:
-            try:
-                return {"value": _call(), "call": _module_name + ".GetProjectFilePath"}
-            except Exception as _exc:
-                return {"error": "{}: {}".format(type(_exc).__name__, _exc)}
-    return {"error": "this build has no GetProjectFilePath"}
+        try:
+            _state[_key] = _call()
+        except Exception as _exc:
+            _state[_key + "_error"] = "{}: {}".format(type(_exc).__name__, _exc)
+    return _state
 
 
+def _mdmcp_mark_unsaved():
+    _count = pattern_api.GetPatternCount()
+    _temporary = pattern_api.CreatePatternWithPoints(
+        [(-9000, -9000, 0), (-8990, -9000, 0), (-8990, -8990, 0), (-9000, -8990, 0)])
+    if pattern_api.GetPatternCount() != _count + 1 or _temporary != _count:
+        raise RuntimeError(
+            "the temporary piece that marks the scene unsaved came back as index {!r} "
+            "with {} pieces; nothing was deleted -- inspect the scene".format(
+                _temporary, pattern_api.GetPatternCount()))
+    _name = "mdmcp_unsaved_marker"
+    pattern_api.SetPatternPieceName(_temporary, _name)
+    if pattern_api.GetPatternPieceName(_count) != _name:
+        raise RuntimeError("could not identify the temporary piece; nothing was deleted")
+    pattern_api.DeletePatternPiece(_count)
+    return bool(utility_api.CheckZPRJForUnsavedChanges())
+'''
+
+#: md_checkpoint, inside MD. ExportZPac, not ExportZPrj: measured on 2026.0.315
+#: (2026-10-11), ExportZPrj in all three forms re-points MD's open project at the copy,
+#: so the user's next Save would write over the checkpoint instead of their work.
+#: ExportZPac left the project path alone -- an unsaved project stayed NULL and a saved
+#: one kept its path -- and carries the garment, not the avatar.
+_CHECKPOINT = _PROJECT_STATE + r'''
+import json, os
+import export_api
+_params = json.loads(__MD_MCP_PARAMS__)
 _result = {"project_before": _mdmcp_project()}
 _path = _params["path"]
 _parent = os.path.dirname(_path)
 if _parent and not os.path.isdir(_parent):
     os.makedirs(_parent)
-_returned = export_api.ExportZPrj(_path)
+_returned = export_api.ExportZPac(_path)
 _result["returned"] = _returned if isinstance(_returned, (bool, int, str)) else repr(_returned)
 _result["bytes"] = os.path.getsize(_path) if os.path.isfile(_path) else 0
-_result["project_after"] = _mdmcp_project()
+_after = _mdmcp_project()
+if _result["project_before"].get("unsaved") and not _after.get("unsaved"):
+    _result["unsaved_restored"] = _mdmcp_mark_unsaved()
+    _after = _mdmcp_project()
+_result["project_after"] = _after
 print(json.dumps(_result))
 '''
 
-#: md_restore, inside MD. ImportZprj needs its option object -- there is no one-argument
-#: form -- and replaces the open scene (measured: a 56-piece garment came back intact).
-_RESTORE = r'''
+#: md_restore, inside MD. A .zpac goes back with ImportZpac, which replaced the garment
+#: and kept the avatar (measured 2026-10-11, onto a scene with an extra piece: the extra
+#: piece went, the avatar stayed). Any .zprj goes back with ImportZprj, which replaces
+#: everything and re-points MD's project at that file. Both need their option object.
+#: Either way the scene now differs from the user's saved file, so the unsaved flag the
+#: import cleared is set again.
+_RESTORE = _PROJECT_STATE + r'''
 import json, os
 import ApiTypes, import_api
 _params = json.loads(__MD_MCP_PARAMS__)
-if not os.path.isfile(_params["path"]):
-    raise FileNotFoundError("no checkpoint at {}".format(_params["path"]))
-_returned = import_api.ImportZprj(_params["path"], ApiTypes.ImportZPRJOption())
-print(json.dumps({"returned": _returned if isinstance(_returned, (bool, int, str))
-                  else repr(_returned)}))
+_path = _params["path"]
+if not os.path.isfile(_path):
+    raise FileNotFoundError("no checkpoint at {}".format(_path))
+if _path.lower().endswith(".zprj"):
+    _returned = import_api.ImportZprj(_path, ApiTypes.ImportZPRJOption())
+else:
+    _returned = import_api.ImportZpac(_path, ApiTypes.ImportExportOption())
+_result = {"returned": _returned if isinstance(_returned, (bool, int, str))
+           else repr(_returned)}
+_result["unsaved_restored"] = _mdmcp_mark_unsaved()
+_result["project_after"] = _mdmcp_project()
+print(json.dumps(_result))
 '''
 
 
