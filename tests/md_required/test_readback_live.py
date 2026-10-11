@@ -93,17 +93,17 @@ def test_measure_reads_the_avatar_and_a_piece_in_millimetres(empty) -> None:
 
 
 @pytest.mark.skipif(not AVATAR.is_file(), reason=f"no avatar shipped at {AVATAR}")
-def test_snapshot_reaches_the_back_and_it_differs_from_the_front(empty) -> None:
+def test_front_side_and_back_are_three_different_pictures(empty) -> None:
     # 8 is the back (measured 2026-10-11). No cloth, so the bytes are stable for a
     # fixed view and a difference means the camera moved.
     load_avatar(AVATAR)
 
-    front, front_meta = bridge.snapshot(2)
-    back, back_meta = bridge.snapshot(8)
+    shots = bridge.snapshots([2, 4, 8])
 
-    assert front.startswith(PNG) and back.startswith(PNG)
-    assert front_meta["camera_moved"] and back_meta["camera_moved"]
-    assert hashlib.sha256(front).digest() != hashlib.sha256(back).digest()
+    assert [meta["view"] for _, meta in shots] == [2, 4, 8]
+    assert all(data.startswith(PNG) and meta["camera_moved"] for data, meta in shots)
+    digests = {hashlib.sha256(data).digest() for data, _ in shots}
+    assert len(digests) == 3, "front, side and back came back as the same picture"
 
 
 # ------------------------------------------------------------------ md_fabric_presets

@@ -545,34 +545,9 @@ def build_server() -> MCPServer:
             )
         return bridge.arrangement_points(points, timeout=timeout_seconds)
 
-    @server.tool()
-    @_reportable
-    def md_snapshot(
-        view: int | None = None, max_size: int | None = SNAPSHOT_MAX_SIZE
-    ) -> list[Image | dict]:
-        """Look at MD's 3D window: a snapshot, returned as an image.
-
-        view: a camera position, 0 to 9, set with SetCamViewPoint. Measured on
-            2026.0.315: 0 bottom, 1 three-quarter right, 2 front, 3 three-quarter left,
-            4 right, 5 top, 6 left, 8 back; 7 zooms in and 9 zooms to fit, both keeping
-            the direction the camera already had. Omit it to photograph the camera where
-            it is. (SetViewPoint, one word away, is accepted and moves nothing.)
-        max_size: the longest edge in pixels, default 1024, so the image stays cheap to
-            keep in the conversation. 0 sends it at full size.
-
-        THE CAMERA IS LEFT WHERE THIS PUT IT. MD has no call that reads the camera back
-        (GetViewPoint answers -1 whatever is set), so the previous view cannot be
-        restored. Comparing snapshots by hash proves nothing either way -- a draped
-        scene never gives the same bytes twice -- so compare the pictures.
-        """
-        if view is not None and view not in CAMERA_VIEWS:
-            raise ValueError(
-                f"view must be 0 to 9 -- the ten SetCamViewPoint positions -- or "
-                f"omitted, not {view!r}"
-            )
-        if max_size is not None and max_size < 0:
-            raise ValueError(f"max_size cannot be negative, not {max_size!r}")
-        data, shot = bridge.snapshot(view)
+    def _picture(data: bytes, shot: dict, max_size: int | None) -> tuple[dict, Image]:
+        """One snapshot, checked, described and scaled -- meta and image."""
+        view = shot.get("view")
         kind = _image_format(data)
         if kind is None:
             raise bridge.BridgeError(
@@ -605,7 +580,50 @@ def build_server() -> MCPServer:
         elif max_size:
             meta["scaling_error"] = f"sent as MD wrote it: only PNGs are scaled, not {kind}"
         meta["bytes"] = len(data)
-        return [meta, Image(data=data, format=kind)]
+        return meta, Image(data=data, format=kind)
+
+    @server.tool()
+    @_reportable
+    def md_snapshot(
+        view: int | None = None,
+        max_size: int | None = SNAPSHOT_MAX_SIZE,
+        views: list[int] | None = None,
+    ) -> list[Image | dict]:
+        """Look at MD's 3D window: snapshots, returned as images.
+
+        view: a camera position, 0 to 9, set with SetCamViewPoint. Measured on
+            2026.0.315: 0 bottom, 1 three-quarter right, 2 front, 3 three-quarter left,
+            4 right, 5 top, 6 left, 8 back; 7 zooms in and 9 zooms to fit, both keeping
+            the direction the camera already had. Omit it to photograph the camera where
+            it is. (SetViewPoint, one word away, is accepted and moves nothing.)
+        views: several positions in one call, one image each, in this order --
+            views=[2, 4, 8] is front, side and back, the quickest way to check a drape
+            all round. Give view or views, not both.
+        max_size: the longest edge of each image in pixels, default 1024, so they stay
+            cheap to keep in the conversation; 512 is plenty for three views. 0 sends
+            them at full size.
+
+        THE CAMERA IS LEFT WHERE THIS PUT IT. MD has no call that reads the camera back
+        (GetViewPoint answers -1 whatever is set), so the previous view cannot be
+        restored. Comparing snapshots by hash proves nothing either way -- a draped
+        scene never gives the same bytes twice -- so compare the pictures.
+        """
+        if view is not None and views:
+            raise ValueError("give view or views, not both")
+        wanted: list[int | None] = list(views) if views else [view]
+        for one in wanted:
+            if one is not None and one not in CAMERA_VIEWS:
+                raise ValueError(
+                    f"a view must be 0 to 9 -- the ten SetCamViewPoint positions -- or "
+                    f"omitted, not {one!r}"
+                )
+        if max_size is not None and max_size < 0:
+            raise ValueError(f"max_size cannot be negative, not {max_size!r}")
+        pictures = [_picture(data, shot, max_size) for data, shot in bridge.snapshots(wanted)]
+        if len(pictures) == 1:
+            meta, image = pictures[0]
+            return [meta, image]
+        return [{"views": [meta for meta, _ in pictures]}] + [image for _, image in pictures]
 
     @server.tool()
     @_reportable

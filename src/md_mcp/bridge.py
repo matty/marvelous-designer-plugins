@@ -938,13 +938,13 @@ print(json.dumps(_result))
 
 #: md_snapshot, inside MD. SetCamViewPoint(0..9) is the camera call that works --
 #: SetViewPoint is accepted and moves nothing -- and Refresh3DWindow goes between the
-#: move and ExportSnapshot3D (measured 2026-09-19 and 2026-10-11, 2026.0.315). The PNG
-#: crosses the bridge as base64 inside the printed JSON, and the file is deleted.
+#: move and ExportSnapshot3D (measured 2026-09-19 and 2026-10-11, 2026.0.315). Several
+#: views are taken in one run, so front, side and back cost one round trip. Each PNG
+#: crosses the bridge as base64 inside the printed JSON, and the files are deleted.
 _SNAPSHOT = r'''
 import base64, json, os, shutil, tempfile
 import export_api, utility_api
 _params = json.loads(__MD_MCP_PARAMS__)
-_result = {"view": _params["view"], "camera_moved": False}
 
 
 def _mdmcp_paths(value, found):
@@ -957,32 +957,36 @@ def _mdmcp_paths(value, found):
     return found
 
 
-if _params["view"] is not None:
-    utility_api.SetCamViewPoint(_params["view"])
-    _result["camera_moved"] = True
-if hasattr(utility_api, "Refresh3DWindow"):
-    utility_api.Refresh3DWindow()
+_shots = []
 _folder = tempfile.mkdtemp(prefix="md-mcp-snapshot-")
 try:
-    _path = os.path.join(_folder, "snapshot.png").replace("\\", "/")
-    _returned = export_api.ExportSnapshot3D(_path)
-    _found = None
-    for _candidate in [_path] + _mdmcp_paths(_returned, []):
-        if os.path.isfile(_candidate):
-            _found = _candidate
-            break
-    if _found is None:
-        raise RuntimeError(
-            "ExportSnapshot3D returned {!r} and wrote nothing at {}".format(
-                _returned, _path))
-    with open(_found, "rb") as _handle:
-        _data = _handle.read()
-    if not _data:
-        raise RuntimeError("ExportSnapshot3D wrote an empty file at {}".format(_found))
-    _result["image_base64"] = base64.b64encode(_data).decode("ascii")
+    for _number, _view in enumerate(_params["views"]):
+        _shot = {"view": _view, "camera_moved": False}
+        if _view is not None:
+            utility_api.SetCamViewPoint(_view)
+            _shot["camera_moved"] = True
+        if hasattr(utility_api, "Refresh3DWindow"):
+            utility_api.Refresh3DWindow()
+        _path = os.path.join(_folder, "snapshot_{}.png".format(_number)).replace("\\", "/")
+        _returned = export_api.ExportSnapshot3D(_path)
+        _found = None
+        for _candidate in [_path] + _mdmcp_paths(_returned, []):
+            if os.path.isfile(_candidate):
+                _found = _candidate
+                break
+        if _found is None:
+            raise RuntimeError(
+                "ExportSnapshot3D returned {!r} and wrote nothing at {}".format(
+                    _returned, _path))
+        with open(_found, "rb") as _handle:
+            _data = _handle.read()
+        if not _data:
+            raise RuntimeError("ExportSnapshot3D wrote an empty file at {}".format(_found))
+        _shot["image_base64"] = base64.b64encode(_data).decode("ascii")
+        _shots.append(_shot)
 finally:
     shutil.rmtree(_folder, ignore_errors=True)
-print(json.dumps(_result))
+print(json.dumps({"shots": _shots}))
 '''
 
 
@@ -1199,13 +1203,25 @@ def arrangement_points(
     return resolved
 
 
+def snapshots(views: list[int | None]) -> list[tuple[bytes, dict]]:
+    """PNGs of MD's 3D window, one per view, taken in one run. None is "as it is"."""
+    taken, _ = _run_snippet(_SNAPSHOT, {"views": list(views)}, "<md-mcp snapshot>")
+    result = []
+    for shot in taken.get("shots", []):
+        encoded = shot.pop("image_base64", None)
+        if not encoded:
+            raise BridgeError(f"MD's snapshot came back without an image: {shot!r}")
+        result.append((base64.b64decode(encoded), shot))
+    if len(result) != len(views):
+        raise BridgeError(
+            f"asked MD for {len(views)} snapshot(s) and got {len(result)}: {taken!r}"
+        )
+    return result
+
+
 def snapshot(view: int | None = None) -> tuple[bytes, dict]:
     """A PNG of MD's 3D window, after moving the camera to ``view`` if one is given."""
-    shot, _ = _run_snippet(_SNAPSHOT, {"view": view}, "<md-mcp snapshot>")
-    encoded = shot.pop("image_base64", None)
-    if not encoded:
-        raise BridgeError(f"MD's snapshot came back without an image: {shot!r}")
-    return base64.b64decode(encoded), shot
+    return snapshots([view])[0]
 
 
 def seams() -> dict:

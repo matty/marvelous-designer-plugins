@@ -485,6 +485,32 @@ def test_the_back_view_is_reachable(md, server) -> None:
 def test_a_view_md_does_not_have_is_refused_before_md_is_asked(md, server) -> None:
     assert "0 to 9" in error_text(call(server, "md_snapshot", {"view": 10}))
     assert "0 to 9" in error_text(call(server, "md_snapshot", {"view": -1}))
+    assert "0 to 9" in error_text(call(server, "md_snapshot", {"views": [2, 11]}))
+    assert not md.calls
+
+
+def test_front_side_and_back_come_back_in_one_call(md, server) -> None:
+    result = call(server, "md_snapshot", {"views": [2, 4, 8], "max_size": 0})
+
+    assert not result.is_error, result.content[0].text
+    metas = json.loads(result.content[0].text)["views"]
+    images = result.content[1:]
+    assert [m["facing"] for m in metas] == ["front", "right", "back"]
+    assert len(images) == 3 and all(i.type == "image" for i in images)
+    # Each view is set, refreshed and exported before the next is set.
+    sequence = [c[:2] if c[0] == "SetCamViewPoint" else c[:1] for c in md.calls
+                if c[0] in ("SetCamViewPoint", "Refresh3DWindow", "ExportSnapshot3D")]
+    assert sequence == [
+        ("SetCamViewPoint", 2), ("Refresh3DWindow",), ("ExportSnapshot3D",),
+        ("SetCamViewPoint", 4), ("Refresh3DWindow",), ("ExportSnapshot3D",),
+        ("SetCamViewPoint", 8), ("Refresh3DWindow",), ("ExportSnapshot3D",),
+    ]
+    assert md.camera == 8
+    assert not [path for path in md.written if os.path.exists(path)]
+
+
+def test_view_and_views_together_are_refused(md, server) -> None:
+    assert "not both" in error_text(call(server, "md_snapshot", {"view": 2, "views": [4]}))
     assert not md.calls
 
 

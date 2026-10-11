@@ -37,7 +37,8 @@ cheap way to look at the result. The background is in the
    waits for the next MD session.
 4. **Dialog warning.** After a mutating reply, md-mcp lists MD's windows; if a dialog is
    showing, the reply says so instead of success.
-5. **`md_snapshot` sheet.** Front, side and back in one image by default.
+5. ~~**`md_snapshot` sheet.**~~ Built: `views=[2, 4, 8]` returns front, side and back in
+   one call, captured in one run inside MD. The live test waits for the next MD session.
 6. **A short guide to MD's behaviour** (`md_guide`, text only), because the server
    instructions are nearly at Claude Code's 2,048-character limit: check the scene, not
    return values; read seams back with `md_seams` after sewing; Layer Clone sews every
