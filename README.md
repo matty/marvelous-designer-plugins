@@ -29,10 +29,10 @@ That starts the bridge and adds **Start MCP** and **Stop MCP**
 to MD's Plugin tab; later sessions are one click there. Nothing listens until Start is
 clicked, because `run_md_python` executes arbitrary Python inside MD.
 
-Run it with nothing else going: MD refuses a registration made from a script running
-inside another one. The Run finishes straight away — a Windows timer on MD's main
-thread does the serving from then on — and the bridge stops with **Stop MCP** or when MD
-closes.
+The Run finishes straight away — a Windows timer on MD's main thread does the serving
+from then on — and the bridge stops with **Stop MCP** or when MD closes. If an entry
+does not appear, MD says why in
+`C:\Users\Public\Documents\MarvelousDesigner\New Assets\api_plugin_log.txt`.
 
 `plugin/README.md` covers the package, registering the entries by hand, and moving the
 port. `python tools/build_plugin.py` builds it; a `v*` tag publishes it beside the wheel.
