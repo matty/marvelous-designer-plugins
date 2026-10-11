@@ -25,6 +25,10 @@ md-mcp = "md_mcp.server:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+# md_guide reads this at run time, so it has to be in the wheel.
+md_mcp = ["guide.md"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-m 'not md_required'"

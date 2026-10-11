@@ -19,8 +19,8 @@ does not expose fails a live test rather than silently never appearing.
 ```powershell
 python -m venv .venv
 .venv\Scripts\pip install -e ".[dev]"
-.venv\Scripts\python.exe -m pytest                  # 93 tests, no MD needed
-.venv\Scripts\python.exe -m pytest -m md_required   # 42 more, with MD open
+.venv\Scripts\python.exe -m pytest                  # no MD needed
+.venv\Scripts\python.exe -m pytest -m md_required   # with MD open; most need it empty
 python tools\build_plugin.py                        # dist/md-mcp-plugin-<version>.zip
 ```
 
@@ -30,7 +30,8 @@ the MD half with `plugin\install.ps1`.
 ## Layout
 
 ```
-src/md_mcp/server.py   The four MCP tools.
+src/md_mcp/server.py   The MCP tools: the raw API, and the tools that read MD back.
+src/md_mcp/guide.md    What md_guide serves: measured facts about MD, kept short.
 src/md_mcp/bridge.py   md-mcp's end of the socket MD listens on.
 plugin/                The other end: the listener that runs inside MD, and its installer.
 tools/build_plugin.py  Packages the listener for MD: stamped, hashed, reproducible.
@@ -39,7 +40,7 @@ docs/md-conventions.md How MD behaves. Measured against a real build, not assume
 docs/roadmap.md        What is next, kept short: only what real sessions showed is needed.
 docs/research/         The research behind the plan, and its notes.
 docs/sessions/         Reports on real garment sessions: what was built, what went wrong.
-docs/adr/001-*.md      Why the transport is a socket MD hosts.
+docs/adr/001-*.md      Why the transport is a socket MD hosts, served from a timer.
 ```
 
 MD cannot be dialled into — this build has no `REST_API` module at all — so MD hosts the

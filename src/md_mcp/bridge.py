@@ -1363,11 +1363,6 @@ def snapshots(views: list[int | None]) -> list[tuple[bytes, dict]]:
     return result
 
 
-def snapshot(view: int | None = None) -> tuple[bytes, dict]:
-    """A PNG of MD's 3D window, after moving the camera to ``view`` if one is given."""
-    return snapshots([view])[0]
-
-
 #: The scene fields every run reply carries, read back by the listener after the run.
 SCENE_KEYS = ("pattern_count", "pieces", "seam_group_count", "avatars", "fabrics")
 

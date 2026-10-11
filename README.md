@@ -52,6 +52,7 @@ port. `python tools/build_plugin.py` builds it; a `v*` tag publishes it beside t
 | `md_seams` | What MD has actually sewn to what: each seam's pieces, spans and line numbers, warnings for an edge sewn twice or to itself, and what changed since an earlier read |
 | `md_checkpoint` | Save the garment to a checkpoint `.zpac`, with a record of what it held. Leaves MD's open project alone, which a `.zprj` save does not, and keeps MD asking to save before closing |
 | `md_restore` | Put a checkpoint's garment back (`latest`, a label, or a path), keeping the open avatar, and say whether it matches the record |
+| `md_guide` | Short, measured facts about how MD behaves -- what its return values do not prove, how seams, placement and saving really work -- to read before changing anything |
 
 A modal dialog in MD holds the thread that serves the bridge. md-mcp watches for one from outside MD: a request blocked by a dialog gives up in about two seconds and says so, and `run_md_python`, `md_call` and `md_status` report a dialog left showing after a reply. It can name the dialog but not read its text, so look at MD.
 
@@ -121,9 +122,10 @@ MD cannot be dialled into — this build has no `REST_API` module — so MD host
 `plugin/md_mcp_listener.py` runs inside MD, binds `127.0.0.1:5121` and serves one JSON
 request per connection; `src/md_mcp/bridge.py` is the other end.
 
-The serve loop runs on **MD's own main thread** because MD only releases the GIL while a
-script is executing: a listener on a daemon thread binds its port and then freezes.
-`docs/adr/001-bridge-transport.md` has the reasoning and what it beat.
+The listener is served by a Windows timer on **MD's own main thread**, because MD only
+releases the GIL while a script is executing: a listener on a daemon thread binds its
+port and then freezes. `docs/adr/001-bridge-transport.md` has the reasoning and what it
+beat.
 
 `run` executes arbitrary Python inside MD over loopback with no authentication — the same
 trust boundary as MD's own script menu.
@@ -131,8 +133,8 @@ trust boundary as MD's own script menu.
 ## Tests
 
 ```powershell
-.venv\Scripts\python.exe -m pytest                  # 93 tests, no MD needed
-.venv\Scripts\python.exe -m pytest -m md_required   # 42 more, MD open (most need it empty)
+.venv\Scripts\python.exe -m pytest                  # no MD needed
+.venv\Scripts\python.exe -m pytest -m md_required   # MD open (most need it empty)
 ```
 
 The first set runs the shipped listener — and the packaged copy — against fake MD

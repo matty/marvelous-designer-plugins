@@ -5,11 +5,13 @@ searches everything the running build exposes, ``md_call`` calls any of it, and
 ``run_md_python`` runs a script inside MD for work that is several calls deep. There is
 no curated subset and no wrapper per feature: the API MD ships is the API this serves.
 
-Four more read back what that API cannot: ``md_measure`` (3D extents, from OBJ exports),
-``md_arrangement_points`` (where arrangement points really are, found with a probe
-piece), ``md_snapshot`` (a picture of the 3D window, returned as an image) and
-``md_fabric_presets`` (the ``.zfab`` files ``AddFabric`` needs). They add no calls to
-MD; each is a script run through the same bridge.
+The rest read back what that API cannot, or keep a scene recoverable: ``md_measure``
+(3D extents, from OBJ exports), ``md_arrangement_points`` (where arrangement points
+really are), ``md_snapshot`` (pictures of the 3D window), ``md_fabric_presets`` (the
+``.zfab`` files ``AddFabric`` needs), ``md_seams`` (what is sewn to what),
+``md_checkpoint`` and ``md_restore`` (the only undo), and ``md_guide`` (measured facts
+about MD, which the instructions have no room for). They add no calls to MD; each is a
+script run through the same bridge.
 
 Everything here is a thin shell. The socket is in ``md_mcp.bridge``; the half that runs
 inside MD is ``plugin/md_mcp_listener.py``.
@@ -33,7 +35,7 @@ from typing import Any
 from mcp.server.mcpserver import Image, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
-from md_mcp import __version__, bridge, checkpoints, dialogs, seams
+from md_mcp import __version__, bridge, checkpoints, dialogs, guide, seams
 
 
 def _reportable(fn: Callable) -> Callable:
@@ -293,7 +295,9 @@ def build_server() -> MCPServer:
         name="md-mcp",
         version=__version__,
         instructions=(
-            "Drives a running Marvelous Designer. md_api searches everything this "
+            "Drives a running Marvelous Designer. Call md_guide before changing "
+            "anything: short, measured facts about how MD behaves. md_api searches "
+            "everything this "
             "build of MD exposes, md_call calls any of it, run_md_python runs a whole "
             "script inside MD. Search before calling: the search gives the exact "
             "spelling and arity, and MD dispatches its overloads on arity. Lengths are "
@@ -312,7 +316,7 @@ def build_server() -> MCPServer:
             "nothing. When a surface will not take a fabric, check it is a pattern "
             "piece: measured 2026-09-19, strap-shaped geometry that was not one "
             "ignored every fabric change.\n"
-            "The call API cannot see the result in 3D, so four tools read it back: "
+            "The call API cannot see the result in 3D, so these read it back: "
             "md_measure (avatar and garment bounds, avatar slices at given heights), "
             "md_arrangement_points (where arrangement points really are -- their names "
             "can be a metre out), md_snapshot (a picture of the 3D window) and "
@@ -655,6 +659,23 @@ def build_server() -> MCPServer:
         fabric_api.AddFabric.
         """
         return bridge.fabric_presets(search)
+
+    @server.tool()
+    @_reportable
+    def md_guide(topic: str = "") -> dict:
+        """How Marvelous Designer behaves through md-mcp: read it before changing anything.
+
+        Short, measured facts -- what MD's return values do and do not prove, how seams,
+        placement and saving really behave, and the workflow that keeps a scene
+        recoverable. Each is backed by md-mcp's docs/md-conventions.md. Nothing in it is
+        about designing garments.
+
+        topic: "workflow", "readback", "seams", "placement", "saving" or "simulation".
+            Leave it empty for all of it (about 4 kB).
+
+        Returns topics (every topic there is) and text (markdown).
+        """
+        return guide.read(topic)
 
     @server.tool()
     @_reportable

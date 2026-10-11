@@ -30,6 +30,7 @@ TOOLS = [
     "md_seams",
     "md_checkpoint",
     "md_restore",
+    "md_guide",
 ]
 
 

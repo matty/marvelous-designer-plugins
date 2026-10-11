@@ -310,6 +310,15 @@ def test_every_note_names_a_call_this_build_actually_has(md_live) -> None:
     assert not missing, f"notes for calls this build does not expose: {missing}"
 
 
+def test_every_call_the_guide_names_exists_in_this_build(md_live) -> None:
+    # The same rot, in md_guide: a fact about a call MD does not have is worse than none.
+    from tests.test_guide import calls_named
+
+    known = {c["call"].split(".")[-1] for c in bridge.api("")}
+
+    assert calls_named() <= known, sorted(calls_named() - known)
+
+
 def test_a_live_search_carries_both_the_signature_and_the_note(md_live) -> None:
     # The whole point: MD supplies the shape, the notes supply the meaning, and a caller
     # searching a call gets both in the one reply.
