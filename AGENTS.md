@@ -37,10 +37,8 @@ plugin/                The other end: the listener that runs inside MD, and its 
 tools/build_plugin.py  Packages the listener for MD: stamped, hashed, reproducible.
 .github/workflows/     Tests on every push; a `v*` tag publishes the zip and the wheel.
 docs/md-conventions.md How MD behaves. Measured against a real build, not assumed.
-docs/roadmap.md        What is next, kept short: only what real sessions showed is needed.
-docs/research/         The research behind the plan, and its notes.
-docs/sessions/         Reports on real garment sessions: what was built, what went wrong.
-docs/adr/001-*.md      Why the transport is a socket MD hosts, served from a timer.
+docs/garment-preflight.md  Checks to run before and after changing a garment.
+CHANGELOG.md           What each version changed, for users. Add to it with every change.
 ```
 
 MD cannot be dialled into — this build has no `REST_API` module at all — so MD hosts the
@@ -56,12 +54,12 @@ MD's host modules, so it installs and tests on a machine with no Marvelous Desig
 If the plugin has been installed, click **Start MCP** in MD's Plugin tab (an install from
 before 2026-10-11 calls it **md-mcp**); a box appears only if it fails. **Stop MCP**
 stops it. Otherwise paste these two lines into **Main Menu → Plugins → Python Editor**,
-then **Run**. Hand them over rather than the file's contents: MD keeps its own editor
+then **Run**, with `<checkout>` replaced by this repo's path. Hand them over rather than the file's contents: MD keeps its own editor
 buffer and it is easy to run a stale copy without noticing — and a pasted body has no
 `__file__`, so it cannot register the entries either.
 
 ```python
-path = r"C:\dev\marvelous-designer-plugins\plugin\md_mcp_listener.py"
+path = r"<checkout>\plugin\md_mcp_listener.py"
 exec(compile(open(path, encoding="utf-8").read(), path, "exec"), {"__file__": path, "__name__": "__main__"})
 ```
 
@@ -158,7 +156,7 @@ Read docs/garment-preflight.md for the recommended construction checks, and load
 the relevant measured sections of docs/md-conventions.md. Keep the transport generic:
 md-mcp's tools check and show what MD did -- `md_seams` reads the ledger back and warns
 on an edge sewn twice or to itself -- and none of them replaces MD's API or encodes
-garment design (docs/roadmap.md). A count proves neither correct sewing nor collision
+garment design. A count proves neither correct sewing nor collision
 freedom.
 
 Every run returns the complete available scene list. Do not reintroduce listener-global

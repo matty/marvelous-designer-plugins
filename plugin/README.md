@@ -54,21 +54,19 @@ inside MD, so the port opens because it was asked for, never as a side effect. C
 Start MCP while it is already listening changes nothing and says so. What stops it is
 **Stop MCP**, a `shutdown` over the socket, or MD closing.
 
-An install from before 2026-10-11 registered one entry, **md-mcp**, pointing at the same
-listener file. It now does what Start MCP does; remove it in Plug-in Manager if two
-Starts is one too many.
+Upgrading from 0.3.0: an entry you added for its listener now does what Start MCP does;
+remove it in Plug-in Manager if two Starts is one too many.
 
 ## Why it is built the way it is
 
 **A Windows timer, not a loop and not a thread.** MD runs Python threads only while a
 script is running: the moment one returns, every thread freezes, so a listener on a
-background thread binds its port and then answers nothing. The listener used to be a
-script that never returned, pumping MD's message queue so MD stayed usable — and that
-held MD's main thread for the whole session, so closing MD left the process running
-behind it. A `user32.SetTimer` thread timer is called from MD's own message loop, on MD's
-main thread, after the script that armed it has returned. Measured inside MD 2026.0.315
-on 2026-10-11: 100 requests at a 31 ms median round trip, MD's API answering inside the
-callback, MD responsive throughout, and the process gone when MD was closed.
+background thread binds its port and then answers nothing. A script that never returns
+would hold MD's main thread for the whole session, so closing MD would leave the process
+running. A `user32.SetTimer` thread timer is called from MD's own message loop, on MD's
+main thread, after the script that armed it has returned. Measured inside MD 2026.0.315:
+100 requests at a 31 ms median round trip, MD responsive throughout, and the process
+gone when MD was closed.
 
 **Each tick takes what is ready and gives the thread back.** It accepts waiting
 connections, reads what has arrived, answers every request that is complete, and
@@ -84,22 +82,13 @@ returns at once, so one request at a time executes inside MD, which is not re-en
 running that file *is* Start — so the listener leaves its state on `builtins`, the one
 place two runs share, with a function Stop MCP calls.
 
-**No window, and why there was one.** The listener had a small `user32` window with
-Start and Stop buttons. It was replaced on 2026-10-11 with the two entries, because it
-was one more thing on screen and the loop behind it kept MD alive. MD's own Qt UI cannot
-be docked into from Python at all, and its `tkinter` is a trap: it imports, and `Tk()`
-raises `TclError: Can't find a usable init.tcl`, because MD ships Tk's DLLs without
-Tcl's script library. `docs/md-conventions.md` keeps every UI measurement for whoever
-wants to reopen the question.
-
 ## Registering
 
 `utility_api.RegisterPythonScript(path, title)` adds an entry — **path first**. MD's
 plugin log, `C:\Users\Public\Documents\MarvelousDesigner\New Assets\api_plugin_log.txt`,
-says why any registration failed: given (title, path) it reported the title as an
-invalid script path (measured on 2026.0.315, 2026-10-11), which is what this plugin did
-until then. MD also declines a path it already has, whatever the title — so an install
-whose listener was added by hand keeps that entry as its Start, under its old title.
+says why any registration failed. MD declines a path it already has, whatever the
+title — so an install whose listener was added by hand keeps that entry as its Start,
+under its old title.
 
 The call is declared `-> bool` and that bool is checked: a `False` is reported and never
 written to `%LOCALAPPDATA%\md-mcp\registered.json`, because an entry recorded as

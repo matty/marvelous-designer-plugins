@@ -3,22 +3,33 @@
 An MCP server that gives a model the whole of a running Marvelous Designer's Python API —
 688 calls across six modules, none of them wrapped, curated or modelled.
 
+Windows only, since Marvelous Designer is. Tested against MD 2026.0.315.
+
 ## Setup
 
+There are two halves: the MCP server your client runs, and a plugin inside Marvelous
+Designer that it talks to. Both come from the
+[releases page](https://github.com/matty/marvelous-designer-plugins/releases) and must
+be the same version.
+
+**1. The server.** With Python 3.11 or newer:
+
 ```powershell
-python -m venv .venv
-.venv\Scripts\pip install -e ".[dev]"
+python -m venv "$env:LOCALAPPDATA\md-mcp-server"
+& "$env:LOCALAPPDATA\md-mcp-server\Scripts\pip" install .\md_mcp-<version>-py3-none-any.whl
 ```
 
-Register `.venv\Scripts\md-mcp.exe` as an MCP server with your client, then install the
-MD half — from a release, unzip and run `install.ps1`; from this checkout:
+Then register `%LOCALAPPDATA%\md-mcp-server\Scripts\md-mcp.exe` as a stdio MCP server
+with your client. For Claude Code:
 
 ```powershell
-.\plugin\install.ps1          # copies the listener to %LOCALAPPDATA%\md-mcp
+claude mcp add marvelous-designer -- "$env:LOCALAPPDATA\md-mcp-server\Scripts\md-mcp.exe"
 ```
 
-It prints two lines and copies them to the clipboard. Paste them once into MD's **Main
-Menu → Plugins → Python Editor** and press **Run**:
+**2. The plugin.** Unzip `md-mcp-plugin-<version>.zip` and run `install.ps1` from it.
+It copies the listener to `%LOCALAPPDATA%\md-mcp`, prints two lines and copies them to
+the clipboard. Paste them once into MD's **Main Menu → Plugins → Python Editor** and
+press **Run**:
 
 ```python
 path = r"C:\Users\you\AppData\Local\md-mcp\md_mcp_listener.py"
@@ -34,8 +45,12 @@ from then on — and the bridge stops with **Stop MCP** or when MD closes. If an
 does not appear, MD says why in
 `C:\Users\Public\Documents\MarvelousDesigner\New Assets\api_plugin_log.txt`.
 
-`plugin/README.md` covers the package, registering the entries by hand, and moving the
-port. `python tools/build_plugin.py` builds it; a `v*` tag publishes it beside the wheel.
+`plugin/README.md` covers registering the entries by hand, moving the port, and
+upgrading. After installing a new version, click **Stop MCP** then **Start MCP** so MD
+loads it; `md_status` says which version answered.
+
+**From source** instead: `pip install -e .` in this checkout, and `.\plugin\install.ps1`
+for the plugin.
 
 ## Tools
 
@@ -124,33 +139,34 @@ request per connection; `src/md_mcp/bridge.py` is the other end.
 
 The listener is served by a Windows timer on **MD's own main thread**, because MD only
 releases the GIL while a script is executing: a listener on a daemon thread binds its
-port and then freezes. `docs/adr/001-bridge-transport.md` has the reasoning and what it
-beat.
+port and then freezes. `plugin/README.md` has the detail.
 
 `run` executes arbitrary Python inside MD over loopback with no authentication — the same
 trust boundary as MD's own script menu.
 
-## Tests
+## Before changing a garment
+
+[docs/garment-preflight.md](docs/garment-preflight.md) lists the checks to run before
+editing patterns or adding seams, and after each small batch: overlap on the 2D board,
+duplicate or overlapping sewing, and intersections in 3D.
+[docs/md-conventions.md](docs/md-conventions.md) is the long form of every measurement,
+with the MD version each was taken on; its examples are not design rules.
+
+A script that fails partway does not roll back the edits it already made. Its reply
+keeps whatever it printed and whatever scene state could be read, and a failed read-back
+is reported separately from a failed script.
+
+## Development
 
 ```powershell
+python -m venv .venv
+.venv\Scripts\pip install -e ".[dev]"
 .venv\Scripts\python.exe -m pytest                  # no MD needed
-.venv\Scripts\python.exe -m pytest -m md_required   # MD open (most need it empty)
+.venv\Scripts\python.exe -m pytest -m md_required   # MD open; most need an empty scene
+python tools\build_plugin.py                        # dist/md-mcp-plugin-<version>.zip
 ```
 
-The first set runs the shipped listener — and the packaged copy — against fake MD
-modules, proving the protocol and nothing about Marvelous Designer. The second proves MD:
-avatar import, drafting, inner shapes, sewing, topstitch, fabric, per-piece physics,
-simulation, OBJ export and both pattern routes, each measured rather than assumed. It
-skips with instructions when MD is not listening, and refuses to run unless the scene is
-empty, because it calls `NewProject`.
-
-## Garment construction context
-
-Read [garment-preflight.md](docs/garment-preflight.md) before editing patterns or adding
-seams. It separates board overlap, duplicate/overlapping sewing, and 3D intersections,
-with checks before and after a small batch. [md-conventions.md](docs/md-conventions.md)
-contains versioned measurements; examples are not universal design constraints.
-
-Script replies now distinguish execution success from unavailable scene read-back,
-retain output and available partial state on failure, and include a complete available
-piece list on every run. Script exceptions do not roll back earlier edits.
+The first set runs the shipped listener against fake MD modules, which proves the
+protocol and nothing about Marvelous Designer. The second needs MD open with the bridge
+started; it calls `NewProject`, so it refuses to run against a scene with anything in it.
+A `v*` tag publishes the plugin zip and the wheel. [AGENTS.md](AGENTS.md) has the rest.

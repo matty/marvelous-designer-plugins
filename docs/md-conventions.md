@@ -1,6 +1,6 @@
 # How Marvelous Designer actually behaves
 
-Measured against **MD 2026.0.315** (Enterprise Network Offline) unless a line says
+Measured against **MD 2026.0.315** unless a line says
 otherwise. Everything here was learned by building scenes in MD and reading them back.
 Measurements below apply to the tested cases, not every topology, pose or MD build.
 For recommended construction checks, read [garment-preflight.md](garment-preflight.md).
@@ -435,10 +435,9 @@ after arranging export an OBJ and read the piece's bounding box — nothing else
 **A workaround that got cloth onto the body, and is not a way to build a garment:** draft
 pieces short, so that their bounding-box centre, and so the piece, arranges near the
 target; sew and simulate; then lengthen with `MovePatternPoint` between simulation runs.
-The 2026-10-11 cape session did this and the user judged the result unusable: it
-re-meshes at every step, drifts curves, and needed freezing and gravity toggling to work
-at all. See [sessions/2026-10-11-vampire-cape.md](sessions/2026-10-11-vampire-cape.md)
-and [roadmap.md](roadmap.md). Mechanics, if it is used for a probe: It is an absolute move, so read each hem point's current position, add
+In a real cape session (2026-10-11) the result was unusable: it re-meshes at every step,
+drifts curves, and needed freezing and gravity toggling to work at all. Mechanics, if it
+is used for a probe: it is an absolute move, so read each hem point's current position, add
 the extra length, and send the sum. Read the outline back after each move, because one MD
 will not accept leaves the piece unchanged without an error, and remember that a moved
 corner carries the adjacent curve with it.

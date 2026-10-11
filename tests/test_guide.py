@@ -53,7 +53,7 @@ def test_the_instructions_send_the_model_to_the_guide() -> None:
 
 def test_the_guide_designs_no_garments() -> None:
     # md-mcp is about how MD behaves. Drafting and construction advice belongs to
-    # whoever is designing, not to the bridge (docs/roadmap.md).
+    # whoever is designing, not to the bridge.
     lowered = guide.text().lower()
     for word in ("lining", "collar", "cape", "drafting", "seam allowance"):
         assert word not in lowered, word

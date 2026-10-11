@@ -18,7 +18,7 @@ inside MD is ``plugin/md_mcp_listener.py``.
 
 Tools **fail** rather than returning an empty result when MD is not listening. A caller
 that read "no patterns found" as success would conclude MD is connected and idle, which
-is the opposite of true. See ``docs/adr/001-bridge-transport.md``.
+is the opposite of true.
 """
 
 from __future__ import annotations
