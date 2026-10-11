@@ -25,16 +25,16 @@ path = r"C:\Users\you\AppData\Local\md-mcp\md_mcp_listener.py"
 exec(compile(open(path, encoding="utf-8").read(), path, "exec"), {"__file__": path, "__name__": "__main__"})
 ```
 
-That opens a control window and adds an **md-mcp** entry to MD's Plugin tab; later
-sessions are one click there. **Press Start to open the port** — the window comes up idle
-because `run_md_python` executes arbitrary Python inside MD, which should take a
-deliberate press.
+That starts the bridge and adds **Start MCP** and **Stop MCP**
+to MD's Plugin tab; later sessions are one click there. Nothing listens until Start is
+clicked, because `run_md_python` executes arbitrary Python inside MD.
 
 Run it with nothing else going: MD refuses a registration made from a script running
-inside another one. **That Run never finishes, and should not** — the listener *is* the
-running script, holding MD's main thread and pumping its message queue. MD stays usable.
+inside another one. The Run finishes straight away — a Windows timer on MD's main
+thread does the serving from then on — and the bridge stops with **Stop MCP** or when MD
+closes.
 
-`plugin/README.md` covers the package, registering the button by hand, and moving the
+`plugin/README.md` covers the package, registering the entries by hand, and moving the
 port. `python tools/build_plugin.py` builds it; a `v*` tag publishes it beside the wheel.
 
 ## Tools
@@ -45,12 +45,33 @@ port. `python tools/build_plugin.py` builds it; a `v*` tag publishes it beside t
 | `md_api` | Search everything this build exposes, with full signatures |
 | `md_call` | Call any one of those functions |
 | `run_md_python` | Run a script inside MD and get back what it printed. `timeout_seconds` overrides the 300s default |
+| `md_measure` | 3D bounds of the avatar and of each garment group, plus avatar slices at given heights, read from OBJ exports MD makes and deletes |
+| `md_arrangement_points` | Where arrangement points really are in 3D. **Temporarily adds one pattern piece**, arranges it at each point, and deletes it; reports the before/after piece count |
+| `md_snapshot` | A picture of the 3D window, returned as an image. `view` 0–9 moves the camera (2 front, 8 back, 4 and 6 the sides) and leaves it there; `max_size` caps the long edge, default 1024 px |
+| `md_fabric_presets` | The `.zfab` files `AddFabric` needs, found beside the running MD and in Public and user Documents |
 
 ```
 md_api("Simulate")     -> the simulation calls this build has, with their signatures
 md_call("utility_api.Simulate", [400])
 run_md_python("import pattern_api; print(pattern_api.GetPatternCount())")
+md_measure(heights=[900, 1200, 1400])          -> avatar bounds and three slices, in mm
+md_arrangement_points(points=["Body_Back"])     -> every point with Body_Back in its name
+md_snapshot(view=4, max_size=800)
+md_fabric_presets("denim")
 ```
+
+The call API has no 3D readback, so the last four read the scene the way that was
+measured to work (2026.0.315): `ExportOBJ` with its option object, millimetres, Y up and
++Z the avatar's front; `SetCamViewPoint` then `ExportSnapshot3D`. They are scripts sent
+through the same bridge and need nothing new installed in MD.
+
+**Exports are checked, not believed.** `ExportOBJ` into a folder that did not exist
+returned its path list and wrote nothing. While any script runs — `md_call`'s included —
+the listener checks each `Export*` call's named and returned paths as it returns:
+`writes` lists what it found, `missing_outputs` and a `warning` mean MD reported a file
+that is not there, and a missing parent folder of an absolute path is created first and
+named in `created_folders`. This part lives in the listener, so it needs the listener in
+MD reloaded; an older one leaves an `md_call` export marked `write_check: unverified`.
 
 **Search before calling.** MD dispatches overloads on arity and argument type, and
 `md_api` gives every signature a call has — including for the 77 that are overloaded. For
@@ -115,3 +136,14 @@ avatar import, drafting, inner shapes, sewing, topstitch, fabric, per-piece phys
 simulation, OBJ export and both pattern routes, each measured rather than assumed. It
 skips with instructions when MD is not listening, and refuses to run unless the scene is
 empty, because it calls `NewProject`.
+
+## Garment construction context
+
+Read [garment-preflight.md](docs/garment-preflight.md) before editing patterns or adding
+seams. It separates board overlap, duplicate/overlapping sewing, and 3D intersections,
+with checks before and after a small batch. [md-conventions.md](docs/md-conventions.md)
+contains versioned measurements; examples are not universal design constraints.
+
+Script replies now distinguish execution success from unavailable scene read-back,
+retain output and available partial state on failure, and include a complete available
+piece list on every run. Script exceptions do not roll back earlier edits.

@@ -18,7 +18,16 @@ from md_mcp import bridge as server_bridge
 from md_mcp.server import build_server
 from tests.fake_md_host import free_port, running_listener
 
-TOOLS = ["md_status", "md_api", "md_call", "run_md_python"]
+TOOLS = [
+    "md_status",
+    "md_api",
+    "md_call",
+    "run_md_python",
+    "md_measure",
+    "md_arrangement_points",
+    "md_snapshot",
+    "md_fabric_presets",
+]
 
 
 @pytest.fixture

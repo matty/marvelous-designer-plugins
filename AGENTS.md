@@ -36,24 +36,28 @@ plugin/                The other end: the listener that runs inside MD, and its 
 tools/build_plugin.py  Packages the listener for MD: stamped, hashed, reproducible.
 .github/workflows/     Tests on every push; a `v*` tag publishes the zip and the wheel.
 docs/md-conventions.md How MD behaves. Measured against a real build, not assumed.
+docs/roadmap.md        What is next, kept short: only what real sessions showed is needed.
+docs/research/         The research behind the plan, and its notes.
+docs/sessions/         Reports on real garment sessions: what was built, what went wrong.
 docs/adr/001-*.md      Why the transport is a socket MD hosts.
 ```
 
 MD cannot be dialled into — this build has no `REST_API` module at all — so MD hosts the
-socket and md-mcp connects to it. One JSON object per line each way. The serve loop runs
-on **MD's own main thread** and pumps MD's message queue: MD only releases the GIL while
-a script is running, so a daemon-thread listener binds its port and then freezes, and
+socket and md-mcp connects to it. One JSON object per line each way. The listener is
+served by a **Windows timer on MD's own main thread**: MD only releases the GIL while a
+script is running, so a daemon-thread listener binds its port and then freezes, and
 every request times out against a bridge that looks connected. `md_mcp` never imports
 MD's host modules, so it installs and tests on a machine with no Marvelous Designer;
 `tests/test_no_md_imports.py` enforces that.
 
 ## Running the listener inside MD
 
-If the plugin has been installed, click **md-mcp** in MD's Plugin tab: it opens the
-control window and serves. Otherwise paste these two lines into **Main Menu → Plugins →
-Python Editor**, then **Run**. Hand them over rather than the file's contents: MD keeps
-its own editor buffer and it is easy to run a stale copy without noticing — and a pasted
-body has no `__file__`, so it cannot register the entry either.
+If the plugin has been installed, click **Start MCP** in MD's Plugin tab (an install from
+before 2026-10-11 calls it **md-mcp**); a box appears only if it fails. **Stop MCP**
+stops it. Otherwise paste these two lines into **Main Menu → Plugins → Python Editor**,
+then **Run**. Hand them over rather than the file's contents: MD keeps its own editor
+buffer and it is easy to run a stale copy without noticing — and a pasted body has no
+`__file__`, so it cannot register the entries either.
 
 ```python
 path = r"C:\dev\marvelous-designer-plugins\plugin\md_mcp_listener.py"
@@ -61,34 +65,32 @@ exec(compile(open(path, encoding="utf-8").read(), path, "exec"), {"__file__": pa
 ```
 
 `compile(..., path, ...)` puts the real filename in a traceback instead of `<string>`.
-It opens the control window **idle** -- **Start** is what binds the port, because `run`
-executes arbitrary Python inside MD and that takes a press, not a side effect of opening
-a menu entry -- and then serves until MD closes or **Stop** is clicked. That run also registers
-the file itself as the single Plugin tab entry, once per installed path. It never
-raises; it reports what happened and serves regardless — including when the window will
-not open, which is reported in a message box and stepped over.
+That run binds the port, arms a 10 ms `user32.SetTimer` timer and **returns**; Windows
+then calls the timer from MD's message loop, on MD's main thread, and each tick accepts,
+reads and answers what is ready and gives the thread straight back. It also registers
+Start MCP (this file) and Stop MCP (`md_mcp_stop.py` beside it) once per installed
+path. Nothing listens until Start is clicked, because `run` executes arbitrary Python
+inside MD. It serves until **Stop MCP**, a `shutdown` request, or MD closing — and
+closing MD now ends the process, which the old never-returning listener did not.
 
-The window is `user32` through `ctypes`, not a toolkit: MD has no Qt binding, and its
-`tkinter` imports but cannot open anything, since MD ships Tk's DLLs without Tcl's
-script library (`Tk()` → "Can't find a usable init.tcl", measured 2026-09-19).
+**A tick never runs inside another.** An MD call that pumps the message queue — a modal
+dialog does — lets the timer fire inside the request that made it; that inner tick
+returns at once, so one request at a time executes inside MD. Stop MCP finds the running
+listener on `builtins` (`__md_mcp_listeners__`), since it cannot import the listener
+without starting it. There is no window: the old `user32` panel and the loop that drove
+it were removed on 2026-10-11.
 
-**One loop does everything.** It pumps MD's message queue, refreshes the window and
-accepts connections. A window with its own `mainloop()`, or a second loop anywhere,
-would hold the only thread MD lets Python run on.
+**`RegisterPythonScript` takes the path first: `(path, title)`.** For a month this repo
+passed `(title, path)` and blamed the `False` on "running inside another script"; MD's
+own plugin log (`C:\Users\Public\Documents\MarvelousDesigner\New Assets\api_plugin_log.txt`)
+showed it reading the title as a path (measured 2026-10-11). It also declines a path it
+already has, whatever the title. Read that log before theorising about a refusal, and
+never record a `False` as success: the entry would never be offered again. The plugin
+list itself is `…\MarvelousDesigner\Plugins\pluginSettings.json`, rewritten when MD exits.
+`plugin/README.md` has the GUI route.
 
-**Register from a top-level Run only.** `RegisterPythonScript` is declared `-> bool`, and
-it answers `False` for every name and path when called from a script running inside
-another one — measured on 2026.0.315, four attempts over the bridge, none of which
-appeared, minutes after the same call worked from the Python Editor. So a registration
-driven through `run_md_python` will not take, and `False` must never be recorded as
-success: the entry would never be offered again. `plugin/README.md` has the GUI route.
-
-**That Run never finishes, and must not.** The listener is the running script. MD stays
-usable because the loop pumps MD's message queue; it is unresponsive only while a
-request is actually executing. **Re-running the script stops the listener — run it once
-more for a fresh one.** It cannot replace it in one run: the second run executes nested
-inside the first one's loop, so the first cannot answer a shutdown or free its port
-until the second returns.
+**After changing the listener, click Stop MCP and then Start MCP.** Start reads the file
+afresh; a listener left running keeps the code it was loaded with.
 
 ## Tests
 
@@ -136,9 +138,9 @@ commit and path, and `md_status` reports all three — check them before believi
 anything else.
 
 **A plugin clicked while a script is running executes nested inside it**, on MD's main
-thread, and can read and change that script's state through `builtins`. That is what
-makes a Stop button possible, and it is also why the clicked script must return promptly:
-nothing below it moves until it does.
+thread, and can read and change that script's state through `builtins` — which is how
+Stop MCP reaches the listener. It is also why a clicked script must return promptly:
+nothing below it moves until it does, and that includes the timer serving the bridge.
 
 **An MD line runs from one straight point to the next**, absorbing every curve point
 between them. A curve sampled at 50 points is one line, not 49.
@@ -148,3 +150,14 @@ between them. A curve sampled at 50 points is one line, not 49.
 **Prefer the live build to any documentation, including `docs/md-conventions.md`.**
 `md_api` reads the running host, which is the only ground truth. When a document turns out
 to be wrong, fix it in the same commit as the code and say which MD version you measured.
+
+## Before garment mutations
+
+Read docs/garment-preflight.md for the recommended construction checks, and load only
+the relevant measured sections of docs/md-conventions.md. Keep the transport generic:
+the seam ledger validator belongs to the shared md-mcp-reliability skill, not a curated
+replacement for MD's API. A count proves neither correct sewing nor collision freedom.
+
+Every run returns the complete available scene list. Do not reintroduce listener-global
+suppression: API queries and independent MCP clients also consume run replies.
+Execution failure and read-back failure are separate; preserve partial output/state.

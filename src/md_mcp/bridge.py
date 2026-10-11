@@ -11,6 +11,7 @@ every error carries the instruction to start it.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import pathlib
@@ -33,6 +34,8 @@ INSTALLED_PLUGIN = ("md-mcp", "md_mcp_listener.py")
 #: Building a jacket is ~50 MD calls; a cold MD can take a while over the first one.
 RUN_TIMEOUT = 300.0
 QUERY_TIMEOUT = 15.0
+#: Walking Public Documents' asset tree from a cold disk is slower than a query.
+PRESET_TIMEOUT = 60.0
 
 
 class BridgeError(RuntimeError):
@@ -71,13 +74,13 @@ def how_to_connect() -> str:
     script = listener_script()
     where = str(script) if script else "plugin/md_mcp_listener.py from the md-mcp repo"
     return (
-        f"No Marvelous Designer listener on {HOST}:{port()}. In MD, click 'md-mcp' in "
-        "the Plugin tab and press Start in the window it opens -- the window comes up "
-        "idle, so opening it is not enough. If there is no such entry yet, run "
-        f"{where} via Main Menu > Plugins > Python Editor > Run, which opens the same "
-        "window and adds the entry. It then serves for the rest of the MD session. "
-        "MD's UI stays usable, but it is the listener that holds MD's main thread, so "
-        "leave the editor's Run in progress -- it is not stuck."
+        f"No Marvelous Designer listener on {HOST}:{port()}. In MD, click 'Start MCP' "
+        "in the Plugin tab (an older install calls it 'md-mcp'); it shows a message box "
+        "only if something went wrong. If there is no such entry yet, run "
+        f"{where} via Main Menu > Plugins > Python Editor > Run, which starts it and "
+        "adds Start MCP and Stop MCP to the Plugin tab. It serves until Stop MCP is "
+        "clicked or MD closes. If MD shows an older md-mcp window instead, that listener "
+        "predates Start MCP: press Start in it, or update the plugin."
     )
 
 
@@ -92,7 +95,7 @@ def _died_mid_request(op: str, exc: OSError | None) -> str:
 
     That cause is overwhelmingly MD itself exiting while running the call. MD's API has
     no crash handling -- a call the host cannot take ends the process, and the listener
-    goes with it, because the listener *is* a script running on MD's main thread.
+    goes with it, because the listener runs inside MD, on MD's main thread.
 
     The wording this replaces ("Either MD closed, or something that is not the md-mcp
     listener holds that port") sent the reader to look at ports, and said nothing about
@@ -109,7 +112,7 @@ def _died_mid_request(op: str, exc: OSError | None) -> str:
         "Look at MD before retrying. If it is gone, everything unsaved in that scene "
         "went with it -- reopen the project, start the listener again, and treat that "
         "call as the suspect rather than repeating it. If MD is still open, the "
-        "listener was stopped instead: press Start in the md-mcp window."
+        "listener was stopped instead: click Start MCP in the Plugin tab."
     )
 
 
@@ -173,8 +176,29 @@ def request(op: str, timeout: float = QUERY_TIMEOUT, **payload: Any) -> dict:
         detail = reply.get("error") or "no reason given"
         trace = reply.get("traceback")
         stamp = reply.get("plugin_build")
+        progress = reply.get("output")
+        scene_keys = ("pattern_count", "pieces", "seam_group_count", "avatars",
+                      "fabrics", "readback_errors")
+        partial_scene = {key: reply[key] for key in scene_keys if key in reply}
+        recovery = ""
+        if reply.get("execution_succeeded") is False:
+            recovery = "\nEarlier changes were not rolled back. Inspect the scene before retrying."
+        if progress:
+            recovery += "\nCaptured output before failure:\n" + progress
+        if partial_scene:
+            recovery += "\nScene after failure: " + json.dumps(partial_scene)
+        # Exports checked before the failure that are worth knowing about: a folder
+        # created for one, or a file MD reported and did not write.
+        flagged = [
+            record for record in reply.get("writes") or []
+            if isinstance(record, dict)
+            and set(record) - {"call", "target", "written"}
+        ]
+        if flagged:
+            recovery += "\nFiles checked before failure: " + json.dumps(flagged)
         raise BridgeError(
             f"Marvelous Designer refused {op!r}: {detail}"
+            + recovery
             + (f"\n{str(trace).strip()}" if trace else "")
             # Which listener raised it. A traceback quoting md_mcp_listener.py is
             # formatted against whatever is on disk now, so after the file is
@@ -185,7 +209,8 @@ def request(op: str, timeout: float = QUERY_TIMEOUT, **payload: Any) -> dict:
                 f"\n(raised by md-mcp listener "
                 f"{reply.get('plugin_version')} build {stamp}; if that is not the "
                 "build you just installed, the listener running in MD is still the "
-                "old one -- Stop and Start it in the md-mcp window.)"
+                "old one -- click Stop MCP and then Start MCP in the Plugin tab, which "
+                "loads the file afresh.)"
                 if stamp
                 else ""
             )
@@ -234,16 +259,21 @@ MD_MODULES = (
 )
 
 
-def _printed_json(source: str, timeout: float) -> Any:
-    """Run a snippet that prints one JSON document, and return what it printed."""
+def _printed_reply(source: str, timeout: float) -> tuple[Any, dict]:
+    """Run a snippet that prints one JSON document: what it printed, and the reply."""
     reply = request("run", timeout=timeout, source=source, name="<md-mcp query>")
     output = reply.get("output", "")
     try:
-        return json.loads(output)
+        return json.loads(output), reply
     except json.JSONDecodeError as exc:
         raise BridgeError(
             f"Expected one JSON document from MD, got: {output[:400]!r}"
         ) from exc
+
+
+def _printed_json(source: str, timeout: float) -> Any:
+    """Run a snippet that prints one JSON document, and return what it printed."""
+    return _printed_reply(source, timeout)[0]
 
 
 def _split(function: str) -> tuple[str, str]:
@@ -273,6 +303,16 @@ def call(function: str, args: list | None = None) -> Any:
     equivalent (``map`` from ``GetBoundingBoxOfPattern``, the ApiTypes enums), and a
     readable repr is more use to the caller than a refusal.
     """
+    return call_checked(function, args)[0]
+
+
+def call_checked(function: str, args: list | None = None) -> tuple[Any, list | None]:
+    """:func:`call`, plus the listener's check of any file the call said it wrote.
+
+    The second item is the reply's ``writes``: one record per ``Export*`` call that
+    named or returned a path, saying which of those paths exist. ``None`` means the
+    listener in MD predates the check, which is not the same as "nothing was written".
+    """
     module, name = _split(function)
     source = (
         f"import json, {module}\n"
@@ -280,9 +320,25 @@ def call(function: str, args: list | None = None) -> Any:
         f"print(json.dumps({{'result': {module}.{name}(*_args)}}, default=repr))\n"
     )
     try:
-        return _printed_json(source, RUN_TIMEOUT)["result"]
+        printed, reply = _printed_reply(source, RUN_TIMEOUT)
     except BridgeError as exc:
         raise _explained(function, exc) from exc
+    return printed["result"], reply.get("writes")
+
+
+#: ``Export*`` calls that write nothing, so are never checked -- mirrors ``NOT_WRITES``
+#: in the listener, which is where the check itself happens.
+NOT_WRITES = frozenset({"ExportObjectBrowserMaterialsList"})
+
+
+def is_write_call(function: str) -> bool:
+    """Whether the listener checks what ``function`` wrote (``module.Export*``)."""
+    module, _, name = function.partition(".")
+    return (
+        module in ("export_api", "pattern_api")
+        and name.startswith("Export")
+        and name not in NOT_WRITES
+    )
 
 
 #: pybind's complaint when the arguments do not match any overload. It is also what a
@@ -436,3 +492,669 @@ def api(search: str = "") -> list[dict]:
     # name silently produces. Annotating it would spend bytes on an answer nobody asked
     # for, so notes arrive with the signatures, when a term brought them.
     return found if not search.split() else notes.annotate(found)
+
+
+# ------------------------------------------------------------ reading back what MD hides
+#
+# Everything below runs inside MD as source text, through the same ``run`` op as
+# md_call, so it works with any listener that answers ``run`` -- nothing new has to be
+# installed in MD for it. What the fake host cannot prove is that MD does what these
+# snippets expect of it; the measurements they rest on are named where they are used.
+
+#: Where a snippet's parameters go: replaced by a Python literal of their JSON.
+_PARAMS = "__MD_MCP_PARAMS__"
+
+#: Shared by the snippets that read geometry. Runs inside MD.
+#:
+#: There is no 3D readback in the call API -- ``utility_api.GetClothPositions`` takes a
+#: list and returns None, so nothing reaches Python -- and nothing reports an avatar's
+#: size or a piece's 3D bounds. Exporting an OBJ and reading it is the route that was
+#: measured to work (2026-10-11, 2026.0.315): millimetres, Y up, +Z the avatar's front.
+#: ``ExportOBJ`` is only ever given its option object: the bare-path overload never
+#: returned in 300s. And its return value is not believed: into a missing folder it
+#: returned the path list of a successful export and wrote nothing.
+_OBJ_HELPERS = r'''
+import json, os, shutil, tempfile, time
+
+_MDMCP_AXES = ("Y up; +Z is the avatar's front; millimetres. Measured on 2026.0.315 "
+               "with ImportExportOption's default scale.")
+
+
+def _mdmcp_paths(value, found=None):
+    found = [] if found is None else found
+    if isinstance(value, str):
+        if value and len(value) < 1024 and "\n" not in value:
+            found.append(value)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            _mdmcp_paths(item, found)
+    return found
+
+
+def _mdmcp_export_obj(folder, stem, avatar, garment):
+    """Export one OBJ into folder; the path MD really wrote, or an exception."""
+    import ApiTypes, export_api
+    option = ApiTypes.ImportExportOption()
+    option.bExportAvatar = avatar
+    option.bExportGarment = garment
+    path = os.path.join(folder, stem + ".obj").replace("\\", "/")
+    export = export_api.ExportOBJ
+    if not path.isascii() and hasattr(export_api, "ExportOBJW"):
+        export = export_api.ExportOBJW
+    returned = export(path, option)
+    named = [p for p in _mdmcp_paths(returned) if p.lower().endswith(".obj")]
+    for candidate in [path] + named:
+        if os.path.isfile(candidate):
+            return candidate
+    raise RuntimeError(
+        "ExportOBJ returned {!r} and wrote no .obj at {}: MD reported an export it "
+        "did not make".format(returned, path))
+
+
+def _mdmcp_read_obj(path, default_group):
+    """All vertex positions, and the vertices of each group statement in turn.
+
+    A group's vertices are the ones its faces use, since an OBJ may list every vertex
+    before any group; a file with no faces falls back to the vertices listed under
+    each group. Vertices before any group statement belong to default_group. A name
+    seen twice is two entries, numbered by occurrence, never merged.
+    """
+    positions = []
+    blocks = []
+    current = None
+    faces_seen = False
+    with open(path, "r", encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            head = line[:2]
+            if head in ("v ", "v\t"):
+                parts = line.split()
+                try:
+                    positions.append((float(parts[1]), float(parts[2]), float(parts[3])))
+                except (IndexError, ValueError):
+                    positions.append(None)
+                if current is None:
+                    current = [default_group, set(), []]
+                    blocks.append(current)
+                current[2].append(len(positions) - 1)
+            elif head in ("f ", "f\t"):
+                faces_seen = True
+                if current is None:
+                    current = [default_group, set(), []]
+                    blocks.append(current)
+                count = len(positions)
+                for token in line.split()[1:]:
+                    try:
+                        index = int(token.split("/", 1)[0])
+                    except ValueError:
+                        continue
+                    current[1].add(index - 1 if index > 0 else count + index)
+            elif head in ("g ", "o ", "g\t", "o\t") or line.strip() in ("g", "o"):
+                current = [line[1:].strip() or default_group, set(), []]
+                blocks.append(current)
+    groups = []
+    occurrences = {}
+    for name, faces, listed in blocks:
+        members = sorted(faces) if faces_seen else listed
+        points = [positions[i] for i in members
+                  if 0 <= i < len(positions) and positions[i] is not None]
+        if not points:
+            continue
+        occurrences[name] = occurrences.get(name, 0) + 1
+        groups.append({"name": name, "occurrence": occurrences[name], "points": points})
+    return [p for p in positions if p is not None], groups
+
+
+def _mdmcp_box(points):
+    low = [min(p[axis] for p in points) for axis in range(3)]
+    high = [max(p[axis] for p in points) for axis in range(3)]
+    return {
+        "min": [round(v, 1) for v in low],
+        "max": [round(v, 1) for v in high],
+        "size": [round(b - a, 1) for a, b in zip(low, high)],
+    }
+
+
+def _mdmcp_centroid(points):
+    count = float(len(points))
+    return [round(sum(p[axis] for p in points) / count, 1) for axis in range(3)]
+
+
+def _mdmcp_cleanup(folder, result):
+    shutil.rmtree(folder, ignore_errors=True)
+    if os.path.exists(folder):
+        result["cleanup_incomplete"] = folder
+'''
+
+
+#: md_measure, inside MD. Two exports -- avatar alone, garment alone -- into a folder it
+#: makes and removes. Nothing in the scene is touched.
+_MEASURE = _OBJ_HELPERS + r'''
+import export_api, pattern_api
+_params = json.loads(__MD_MCP_PARAMS__)
+_started = time.monotonic()
+_result = {"units": "mm", "axes": _MDMCP_AXES}
+_folder = tempfile.mkdtemp(prefix="md-mcp-measure-")
+try:
+    try:
+        _avatars = list(export_api.GetAvatarNameList())
+    except Exception as exc:
+        _avatars = None
+        _result["avatar_names_error"] = "{}: {}".format(type(exc).__name__, exc)
+    if _avatars == []:
+        _result["avatar"] = None
+        _result["avatar_note"] = "no avatar in the scene: GetAvatarNameList() is empty"
+    else:
+        _positions, _groups = _mdmcp_read_obj(
+            _mdmcp_export_obj(_folder, "avatar", True, False), "avatar")
+        if not _positions:
+            _result["avatar"] = None
+            _result["avatar_note"] = "MD exported the avatar with no vertices in it"
+        else:
+            _avatar = {"names": _avatars, "vertices": len(_positions)}
+            _avatar.update(_mdmcp_box(_positions))
+            _avatar["groups"] = sorted(set(g["name"] for g in _groups))[:20]
+            _result["avatar"] = _avatar
+            if _params["heights"]:
+                _half = _params["band_mm"] / 2.0
+                _sections = []
+                for _height in _params["heights"]:
+                    _band = [p for p in _positions
+                             if _height - _half <= p[1] <= _height + _half]
+                    _section = {"height": _height, "vertices": len(_band)}
+                    if _band:
+                        _section["x"] = [round(min(p[0] for p in _band), 1),
+                                         round(max(p[0] for p in _band), 1)]
+                        _section["z"] = [round(min(p[2] for p in _band), 1),
+                                         round(max(p[2] for p in _band), 1)]
+                    _sections.append(_section)
+                _result["cross_sections"] = {
+                    "band_mm": _params["band_mm"], "sections": _sections}
+    if _params["heights"] and "cross_sections" not in _result:
+        _result["cross_sections"] = None
+    if pattern_api.GetPatternCount() == 0:
+        _result["garment"] = None
+        _result["garment_note"] = "no pattern pieces in the scene"
+    else:
+        _positions, _groups = _mdmcp_read_obj(
+            _mdmcp_export_obj(_folder, "garment", False, True), "garment")
+        if not _positions:
+            _result["garment"] = None
+            _result["garment_note"] = "MD exported the garment with no vertices in it"
+        else:
+            _garment = {"vertices": len(_positions)}
+            _garment.update(_mdmcp_box(_positions))
+            _terms = _params["group_search"].lower().split()
+            _listed = [g for g in _groups
+                       if all(t in g["name"].lower() for t in _terms)]
+            _entries = []
+            for _group in _listed[:_params["max_groups"]]:
+                _box = _mdmcp_box(_group["points"])
+                _entry = {"name": _group["name"]}
+                if _group["occurrence"] > 1:
+                    _entry["occurrence"] = _group["occurrence"]
+                _entry["vertices"] = len(_group["points"])
+                _entry["min"] = _box["min"]
+                _entry["max"] = _box["max"]
+                _entry["centroid"] = _mdmcp_centroid(_group["points"])
+                _entries.append(_entry)
+            _garment["groups_total"] = len(_groups)
+            _repeated = sorted(set(g["name"] for g in _groups if g["occurrence"] > 1))
+            if _repeated:
+                _garment["repeated_group_names"] = _repeated
+            if _terms:
+                _garment["groups_matching"] = len(_listed)
+            if len(_listed) > len(_entries):
+                _garment["groups_omitted"] = len(_listed) - len(_entries)
+            _garment["groups"] = _entries
+            _result["garment"] = _garment
+finally:
+    _mdmcp_cleanup(_folder, _result)
+_result["elapsed_seconds"] = round(time.monotonic() - _started, 3)
+print(json.dumps(_result))
+'''
+
+
+#: md_arrangement_points, inside MD. The method measured on 2026-10-11 (2026.0.315):
+#: GetArrangementList() gives names and percentage offsets and no positions, and on a
+#: tailed avatar the body points sat about a metre behind the back -- so the only way to
+#: know where a point is, is to put something there and look. A probe piece is added
+#: last, arranged at each point in turn, exported garment-only and measured, and
+#: deleted. DeletePatternPiece renumbers every later piece, so the probe is found by its
+#: own name before anything is deleted, and nothing is deleted unless the count says
+#: exactly one piece was added.
+_ARRANGEMENT = _OBJ_HELPERS + r'''
+import pattern_api, export_api, uuid
+_params = json.loads(__MD_MCP_PARAMS__)
+_started = time.monotonic()
+_PROBE_OUTLINE = [(0, 0, 0), (200, 0, 0), (200, 100, 0), (100, 140, 0), (0, 100, 0)]
+
+
+def _mdmcp_point_name(entry):
+    if isinstance(entry, str):
+        return entry
+    if isinstance(entry, dict):
+        for key in ("ArrangementName", "Name", "name"):
+            if isinstance(entry.get(key), str):
+                return entry[key]
+        for key, value in entry.items():
+            if "name" in str(key).lower() and isinstance(value, str):
+                return value
+    if isinstance(entry, (list, tuple)):
+        for value in entry:
+            if isinstance(value, str):
+                return value
+    return str(entry)
+
+
+def _mdmcp_state():
+    state = {}
+    reads = (
+        ("pattern_count", pattern_api.GetPatternCount),
+        ("seam_group_count", pattern_api.GetSeamlinePairGroupCount),
+        ("fabrics", lambda: list(__import__("fabric_api").GetFabricStyleNameList())),
+    )
+    for key, read in reads:
+        try:
+            state[key] = read()
+        except Exception as exc:
+            state.setdefault("errors", {})[key] = "{}: {}".format(type(exc).__name__, exc)
+    return state
+
+
+def _mdmcp_probe_points(groups, probe_name, baseline):
+    lowered = probe_name.lower()
+    named = [g for g in groups if g["name"] == probe_name] or [
+        g for g in groups if lowered in g["name"].lower()]
+    if named:
+        return [p for g in named for p in g["points"]], "its group name"
+    if baseline is None:
+        if groups:
+            return ([p for g in groups for p in g["points"]],
+                    "being the only piece in the scene")
+    else:
+        added = [g for g in groups if (g["name"], g["occurrence"]) not in baseline]
+        if added:
+            return ([p for g in added for p in g["points"]],
+                    "the group the export gained when it was added")
+    raise RuntimeError(
+        "could not tell the probe from the rest of the garment in the export; its "
+        "groups were {}".format(sorted(set(g["name"] for g in groups))[:20]))
+
+
+def _mdmcp_remove_probe(probe, probe_name, named, before_count):
+    count = pattern_api.GetPatternCount()
+    if count != before_count + 1:
+        return {"error": (
+            "the pattern count is {} where the probe should have made it {}, so nothing "
+            "was deleted: inspect the scene".format(count, before_count + 1))}
+    index = None
+    if named:
+        first = [probe] if isinstance(probe, int) and 0 <= probe < count else []
+        for candidate in first + list(range(count)):
+            try:
+                if pattern_api.GetPatternPieceName(candidate) == probe_name:
+                    index = candidate
+                    break
+            except Exception:
+                continue
+    elif probe == count - 1:
+        # Unnamed, so only the index vouches for it -- and only the last index can be
+        # the piece that was just added.
+        index = probe
+    if index is None:
+        return {"error": (
+            "the pattern count rose by one but the probe could not be identified, so "
+            "nothing was deleted: the last piece (index {}) is probably it".format(
+                count - 1))}
+    pattern_api.DeletePatternPiece(index)
+    return {"deleted_index": index}
+
+
+_names = [_mdmcp_point_name(entry) for entry in list(pattern_api.GetArrangementList())]
+_result = {"units": "mm", "axes": _MDMCP_AXES, "available": len(_names)}
+_chosen = []
+_unmatched = []
+if _params["points"] is None:
+    _chosen = list(range(len(_names)))
+else:
+    for _want in _params["points"]:
+        if isinstance(_want, int) and not isinstance(_want, bool):
+            _hits = [_want] if 0 <= _want < len(_names) else []
+        else:
+            _text = str(_want)
+            _hits = [i for i, n in enumerate(_names) if n == _text] or [
+                i for i, n in enumerate(_names) if _text.lower() in n.lower()]
+        if not _hits:
+            _unmatched.append(_want)
+        for _hit in _hits:
+            if _hit not in _chosen:
+                _chosen.append(_hit)
+if _unmatched:
+    _result["unmatched"] = _unmatched
+_points = []
+_failed = []
+if not _chosen:
+    _result["points"] = []
+    _result["probe"] = {"used": False, "why": (
+        "no arrangement point to resolve"
+        + ("" if _names else ": GetArrangementList() is empty, which the shipped "
+           "Genesis8 avatar was measured to be"))}
+else:
+    _before = _mdmcp_state()
+    _folder = tempfile.mkdtemp(prefix="md-mcp-arrange-")
+    _probe = None
+    _attempted = False
+    _probe_name = "mdmcp_probe_" + uuid.uuid4().hex[:8]
+    _named = False
+    _found_by = None
+    _removal = {}
+    try:
+        if "pattern_count" not in _before:
+            raise RuntimeError(
+                "the pattern count cannot be read, so a probe could not be removed "
+                "safely; no probe was added")
+        _baseline = None
+        if _before["pattern_count"]:
+            _baseline_groups = _mdmcp_read_obj(
+                _mdmcp_export_obj(_folder, "baseline", False, True), "garment")[1]
+            _baseline = set((g["name"], g["occurrence"]) for g in _baseline_groups)
+        _attempted = True
+        _probe = pattern_api.CreatePatternWithPoints(_PROBE_OUTLINE)
+        _count = pattern_api.GetPatternCount()
+        if _count != _before["pattern_count"] + 1:
+            raise RuntimeError(
+                "CreatePatternWithPoints answered {!r} but the pattern count went from "
+                "{} to {}".format(_probe, _before["pattern_count"], _count))
+        if _probe != _before["pattern_count"]:
+            # Naming or arranging any other index would edit somebody's piece.
+            raise RuntimeError(
+                "CreatePatternWithPoints answered index {!r}, not {}, the last one; "
+                "nothing was done to that index".format(_probe, _before["pattern_count"]))
+        try:
+            pattern_api.SetPatternPieceName(_probe, _probe_name)
+            _named = pattern_api.GetPatternPieceName(_probe) == _probe_name
+        except Exception:
+            _named = False
+        for _index in _chosen:
+            _entry = {"index": _index, "name": _names[_index]}
+            try:
+                if pattern_api.SetArrangement(_probe, _index) is False:
+                    raise RuntimeError("SetArrangement returned False")
+                _groups = _mdmcp_read_obj(
+                    _mdmcp_export_obj(_folder, "probe_{}".format(_index), False, True),
+                    "garment")[1]
+                _mine, _found_by = _mdmcp_probe_points(_groups, _probe_name, _baseline)
+                _box = _mdmcp_box(_mine)
+                _entry["center"] = [round((a + b) / 2.0, 1)
+                                    for a, b in zip(_box["min"], _box["max"])]
+                _entry["min"] = _box["min"]
+                _entry["max"] = _box["max"]
+                _points.append(_entry)
+            except Exception as exc:
+                _entry["error"] = "{}: {}".format(type(exc).__name__, exc)
+                _failed.append(_entry)
+    except Exception as exc:
+        _result["error"] = "{}: {}".format(type(exc).__name__, exc)
+    finally:
+        if _attempted:
+            try:
+                _removal = _mdmcp_remove_probe(
+                    _probe, _probe_name, _named, _before["pattern_count"])
+            except Exception as exc:
+                _removal = {"error": "deleting the probe failed: {}: {}".format(
+                    type(exc).__name__, exc)}
+        _after = _mdmcp_state()
+        _mdmcp_cleanup(_folder, _result)
+    _result["points"] = _points
+    if _failed:
+        _result["failed"] = _failed
+    _probe_report = {
+        "used": _attempted,
+        "what": (
+            "Added one temporary pattern piece (a 200 x 140 mm probe named {}), "
+            "arranged it at each point, exported the garment to see where it landed, "
+            "and deleted it again.".format(_probe_name)),
+        "pattern_count_before": _before.get("pattern_count"),
+        "pattern_count_after": _after.get("pattern_count"),
+        "seam_group_count_before": _before.get("seam_group_count"),
+        "seam_group_count_after": _after.get("seam_group_count"),
+        "fabrics_unchanged": _before.get("fabrics") == _after.get("fabrics"),
+    }
+    _probe_report["unchanged"] = (
+        "pattern_count" in _after
+        and _before.get("pattern_count") == _after.get("pattern_count")
+        and _before.get("seam_group_count") == _after.get("seam_group_count")
+        and _probe_report["fabrics_unchanged"])
+    _probe_report.update(_removal)
+    if _found_by:
+        _probe_report["found_in_export_by"] = _found_by
+    if _after.get("errors"):
+        _probe_report["readback_errors"] = _after["errors"]
+    _result["probe"] = _probe_report
+_result["elapsed_seconds"] = round(time.monotonic() - _started, 3)
+print(json.dumps(_result))
+'''
+
+
+#: md_snapshot, inside MD. SetCamViewPoint(0..9) is the camera call that works --
+#: SetViewPoint is accepted and moves nothing -- and Refresh3DWindow goes between the
+#: move and ExportSnapshot3D (measured 2026-09-19 and 2026-10-11, 2026.0.315). The PNG
+#: crosses the bridge as base64 inside the printed JSON, and the file is deleted.
+_SNAPSHOT = r'''
+import base64, json, os, shutil, tempfile
+import export_api, utility_api
+_params = json.loads(__MD_MCP_PARAMS__)
+_result = {"view": _params["view"], "camera_moved": False}
+
+
+def _mdmcp_paths(value, found):
+    if isinstance(value, str):
+        if value and len(value) < 1024 and "\n" not in value:
+            found.append(value)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            _mdmcp_paths(item, found)
+    return found
+
+
+if _params["view"] is not None:
+    utility_api.SetCamViewPoint(_params["view"])
+    _result["camera_moved"] = True
+if hasattr(utility_api, "Refresh3DWindow"):
+    utility_api.Refresh3DWindow()
+_folder = tempfile.mkdtemp(prefix="md-mcp-snapshot-")
+try:
+    _path = os.path.join(_folder, "snapshot.png").replace("\\", "/")
+    _returned = export_api.ExportSnapshot3D(_path)
+    _found = None
+    for _candidate in [_path] + _mdmcp_paths(_returned, []):
+        if os.path.isfile(_candidate):
+            _found = _candidate
+            break
+    if _found is None:
+        raise RuntimeError(
+            "ExportSnapshot3D returned {!r} and wrote nothing at {}".format(
+                _returned, _path))
+    with open(_found, "rb") as _handle:
+        _data = _handle.read()
+    if not _data:
+        raise RuntimeError("ExportSnapshot3D wrote an empty file at {}".format(_found))
+    _result["image_base64"] = base64.b64encode(_data).decode("ascii")
+finally:
+    shutil.rmtree(_folder, ignore_errors=True)
+print(json.dumps(_result))
+'''
+
+
+#: md_fabric_presets, inside MD. AddFabric wants a .zfab path, and the shipped presets
+#: were found only by searching the disk (2026-10-11): Public Documents'
+#: MarvelousDesigner tree ("New Assets\Fabric") and the "Preset" folder of MD's install,
+#: which is the folder of sys.executable inside MD. The install is located from the
+#: running MD rather than from any path written down here; the user's own Documents are
+#: searched too. Folders are asked of Windows first and the environment second.
+_FABRIC_PRESETS = r'''
+import json, os, sys
+_params = json.loads(__MD_MCP_PARAMS__)
+
+
+def _mdmcp_shell_folder(csidl):
+    try:
+        import ctypes
+        buffer = ctypes.create_unicode_buffer(1024)
+        if ctypes.windll.shell32.SHGetFolderPathW(None, csidl, None, 0, buffer) == 0:
+            return buffer.value or None
+    except Exception:
+        return None
+    return None
+
+
+_roots = []
+_install = os.path.dirname(sys.executable) if sys.executable else ""
+for _base in (_install, os.path.dirname(_install) if _install else "",
+              getattr(sys, "prefix", "") or ""):
+    if _base:
+        _roots.append(("md install", os.path.join(_base, "Preset")))
+_public = _mdmcp_shell_folder(0x2E)
+if _public:
+    _roots.append(("public documents", os.path.join(_public, "MarvelousDesigner")))
+if os.environ.get("PUBLIC"):
+    _roots.append(("public documents",
+                   os.path.join(os.environ["PUBLIC"], "Documents", "MarvelousDesigner")))
+_documents = _mdmcp_shell_folder(0x05)
+if _documents:
+    _roots.append(("user documents", os.path.join(_documents, "MarvelousDesigner")))
+_roots.append(("user documents",
+               os.path.join(os.path.expanduser("~"), "Documents", "MarvelousDesigner")))
+
+_terms = _params["search"].lower().split()
+_searched = []
+_seen_roots = set()
+_seen_files = set()
+_folders = {}
+_total = 0
+for _source, _root in _roots:
+    _root = os.path.normpath(_root)
+    _key = os.path.normcase(_root)
+    if _key in _seen_roots:
+        continue
+    _seen_roots.add(_key)
+    if not os.path.isdir(_root):
+        _searched.append({"root": _root, "source": _source, "exists": False})
+        continue
+    _here = 0
+    for _dir, _subdirs, _files in os.walk(_root):
+        _subdirs.sort()
+        for _file in sorted(_files):
+            if not _file.lower().endswith(".zfab"):
+                continue
+            _full = os.path.join(_dir, _file)
+            if os.path.normcase(_full) in _seen_files:
+                continue
+            _seen_files.add(os.path.normcase(_full))
+            _here += 1
+            if _terms and not all(t in _full.lower() for t in _terms):
+                continue
+            _folders.setdefault(_dir, {"folder": _dir, "source": _source, "fabrics": []})
+            _folders[_dir]["fabrics"].append(
+                {"name": os.path.splitext(_file)[0], "path": _full})
+    _total += _here
+    _searched.append({"root": _root, "source": _source, "exists": True,
+                      "zfab_files": _here})
+print(json.dumps({
+    "md_executable": sys.executable,
+    "count": sum(len(f["fabrics"]) for f in _folders.values()),
+    "total": _total,
+    "roots": _searched,
+    "folders": list(_folders.values()),
+}))
+'''
+
+
+def _decode_printed(output: str) -> Any:
+    """The JSON document a snippet printed -- its last line if something printed first."""
+    try:
+        return json.loads(output)
+    except json.JSONDecodeError:
+        pass
+    for line in reversed(output.splitlines()):
+        if line.strip():
+            try:
+                return json.loads(line)
+            except json.JSONDecodeError:
+                break
+    raise BridgeError(f"Expected one JSON document from MD, got: {output[:400]!r}")
+
+
+def _run_snippet(
+    source: str, params: dict, name: str, timeout: float = RUN_TIMEOUT
+) -> tuple[dict, dict]:
+    """Run one of the snippets above with ``params``: what it printed, and the reply."""
+    script = source.replace(_PARAMS, repr(json.dumps(params)))
+    reply = request("run", timeout=timeout, source=script, name=name)
+    return _decode_printed(reply.get("output", "")), reply
+
+
+def measure(
+    heights: list[float] | None = None,
+    band_mm: float = 20.0,
+    group_search: str = "",
+    max_groups: int = 100,
+) -> dict:
+    """The avatar's and the garment's 3D extent, read from OBJ exports inside MD."""
+    measured, _ = _run_snippet(
+        _MEASURE,
+        {
+            "heights": [float(h) for h in heights or []],
+            "band_mm": float(band_mm),
+            "group_search": group_search,
+            "max_groups": int(max_groups),
+        },
+        "<md-mcp measure>",
+    )
+    return measured
+
+
+def arrangement_points(
+    points: list | None = None, timeout: float | None = None
+) -> dict:
+    """Where each arrangement point really is, found by arranging a probe piece there.
+
+    Raises :class:`BridgeError` when the run as a whole failed, with the probe check in
+    the message: the part a caller must not lose is whether the scene was put back.
+    """
+    resolved, reply = _run_snippet(
+        _ARRANGEMENT,
+        {"points": points},
+        "<md-mcp arrangement points>",
+        timeout=RUN_TIMEOUT if timeout is None else timeout,
+    )
+    probe = resolved.get("probe") or {}
+    # The listener reads the scene back after every run, independently of the script,
+    # so the count it reports is a second witness to the probe having gone.
+    if "pattern_count" in reply and probe.get("used"):
+        probe["pattern_count_read_back"] = reply["pattern_count"]
+        if reply["pattern_count"] != probe.get("pattern_count_before"):
+            probe["unchanged"] = False
+    if resolved.get("error"):
+        raise BridgeError(
+            f"Resolving arrangement points failed: {resolved['error']}\n"
+            f"Probe check: {json.dumps(probe)}"
+        )
+    return resolved
+
+
+def snapshot(view: int | None = None) -> tuple[bytes, dict]:
+    """A PNG of MD's 3D window, after moving the camera to ``view`` if one is given."""
+    shot, _ = _run_snippet(_SNAPSHOT, {"view": view}, "<md-mcp snapshot>")
+    encoded = shot.pop("image_base64", None)
+    if not encoded:
+        raise BridgeError(f"MD's snapshot came back without an image: {shot!r}")
+    return base64.b64decode(encoded), shot
+
+
+def fabric_presets(search: str = "") -> dict:
+    """The .zfab files MD ships and the user keeps, found from inside MD."""
+    found, _ = _run_snippet(
+        _FABRIC_PRESETS, {"search": search}, "<md-mcp fabric presets>", PRESET_TIMEOUT
+    )
+    return found

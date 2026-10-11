@@ -9,13 +9,13 @@
     of its own rather than staying in a repo checkout that will be moved, renamed or
     thrown away.
 
-    Copies the listener (and its README and manifest) to $Destination, verifying them
-    against the manifest's SHA-256 when one is present -- a packaged release always has
-    one, a run straight from a checkout does not. Then prints the two lines to paste
-    into MD once, and puts them on the clipboard.
+    Copies the listener, its Stop script, README and manifest to $Destination,
+    verifying them against the manifest's SHA-256 when one is present -- a packaged
+    release always has one, a run straight from a checkout does not. Then prints the two
+    lines to paste into MD once, and puts them on the clipboard.
 
-    Installing does not register anything: the md-mcp entry in MD's Plugin tab is
-    registered inside MD, on the first run. See plugin/README.md.
+    Installing does not register anything: the Start MCP and Stop MCP entries in MD's
+    Plugin tab are registered inside MD, on the first run. See plugin/README.md.
 
 .PARAMETER Destination
     Where to install. Defaults to %LOCALAPPDATA%\md-mcp.
@@ -117,7 +117,7 @@ else {
 }
 
 New-Item -ItemType Directory -Path $Destination -Force | Out-Null
-foreach ($name in @($entry, 'README.md', 'manifest.json')) {
+foreach ($name in @($entry, 'md_mcp_stop.py', 'README.md', 'manifest.json')) {
     $file = Join-Path $source $name
     if (Test-Path $file) {
         Copy-Item -Path $file -Destination (Join-Path $Destination $name) -Force
@@ -152,15 +152,10 @@ catch {
 }
 
 Write-Host ''
-Write-Host 'That Run opens a small window with Start and Stop in it, and adds one entry'
-Write-Host '-- md-mcp -- to MD''s Plugin tab, so every later session is a click and no'
-Write-Host 'pasting. Press Start to open the port: the window comes up idle, because the'
-Write-Host 'bridge runs Python inside MD and that should take a press rather than happen'
-Write-Host 'because somebody opened a menu entry. The Run itself never finishes, which is'
-Write-Host 'correct: the listener is the running script, and MD stays usable while it'
-Write-Host 'serves.'
+Write-Host 'That Run starts the bridge and finishes; a message box appears only if it fails.'
+Write-Host 'It also adds two entries to MD''s Plugin tab, Start MCP and Stop MCP, so every'
+Write-Host 'later session is a click and no pasting. Closing MD stops the bridge too.'
 Write-Host ''
-Write-Host 'Closing the window does not stop the bridge. Clicking md-mcp brings it back.'
-Write-Host ''
-Write-Host 'If the entry does not appear, add it by hand -- Plugin tab > Plug-in Manager'
-Write-Host "> + ADD > $installed"
+Write-Host 'If the entries do not appear, add them by hand -- Plugin tab > Plug-in Manager'
+Write-Host "> + ADD > $installed (Start MCP)"
+Write-Host "> + ADD > $(Join-Path $Destination 'md_mcp_stop.py') (Stop MCP)"

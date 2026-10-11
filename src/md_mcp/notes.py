@@ -39,7 +39,26 @@ NOTES: dict[str, str] = {
         "first point as the last and the resulting lines cannot be addressed at all. "
         "Addressable lines equal the number of type-0 points, so a curve sampled at "
         "eight points is ONE line, and any point that must sew to two different "
-        "counterparts has to be straight."
+        "counterparts has to be straight. Line i runs from straight point i to i+1 and "
+        "the last closes back to point 0. Type-2 points come back from "
+        "ExportPatternJSON as PointType 'Polyline'."
+    ),
+    "pattern_api.MovePatternPoint": (
+        "Absolute, not relative: (piece, i, x, y) puts straight point i AT (x, y) -- "
+        "(1, 50, 0) took a 300 x 200 rectangle's point 1 from (300, 0) to (50, 0). It "
+        "looks like a delta only on a point sitting at the origin. i counts the straight "
+        "points, the ones GetPatternInputInformation's PointList reports. A move that "
+        "would leave the outline degenerate -- a point onto its neighbour, or onto "
+        "another edge -- is refused silently: None, no error, piece unchanged. Moving a "
+        "corner carries the adjacent curve's interior with a linear falloff: a corner "
+        "moved 100mm shifted curve points at x = 100, 200, 300 on a line to x = 400 by "
+        "74.5, 50 and 25.5. To lengthen, read the point and send position plus offset; "
+        "read the outline back after every move."
+    ),
+    "pattern_api.GetPatternPiecePos": (
+        "The centre of the piece's 2D bounding box, not the point it was drawn from: "
+        "[100, 50] for a 200 x 100 rectangle drawn from (0, 0). SetArrangement puts that "
+        "same centre on the arrangement point."
     ),
     "pattern_api.CreateInternalShapeWithPoints": (
         "Returns an index scoped to the parent pattern, not a scene-global one -- the "
@@ -104,6 +123,9 @@ NOTES: dict[str, str] = {
         "The direction flags mean 'along increasing point index', so two "
         "counter-clockwise pieces meeting face to face take (True, False) -- both "
         "pairings are accepted, and (True, True) measured as a collapsed, bunched tube. "
+        "Before adding a seam, check existing/planned pairs for duplicates and reused "
+        "edge intervals; intentional layered sewing needs an explicit construction reason. "
+        "Derive direction from this contour, not a universal flag pair. "
         "Sewing an edge to itself raises a modal dialog, which freezes MD's main thread "
         "and with it this bridge."
     ),
@@ -113,10 +135,17 @@ NOTES: dict[str, str] = {
     ),
     # -- Arrangement and avatars -----------------------------------------------------
     "pattern_api.SetArrangementPosition": (
-        "Does nothing. Swept over five values with an avatar loaded, the garment moved "
-        "7.7mm against an expected 377, while SetArrangementOrientation on the same "
-        "piece moved it 342mm. The readback echoes the integer back, which is why it "
-        "looks as though it worked."
+        "(piece, x, y, offset), each 0-100 -- the Position X, Position Y and Offset of "
+        "the GUI's arrangement properties, written to GetArrangementOfPattern's "
+        "ArrangementOffsetX/Y/Z; 150 is refused and the old value kept. It moves "
+        "NOTHING until the piece is re-placed: follow it with SetArrangementOrientation "
+        "(piece, its current orientation), which re-places that piece alone. "
+        "ResetClothArrangement() works too but re-places every piece. SetArrangement "
+        "afterwards puts the point's defaults back. x runs round the bounding volume "
+        "(on Neck_Back 50 was the back of the neck, 0 and 100 both the front), y along "
+        "it, and offset is distance from it, about 2mm a unit on Nardo. Measured "
+        "2026-10-11, 2026.0.315, which overturned an earlier 'does nothing' that read "
+        "the piece without re-placing it."
     ),
     "pattern_api.SetArrangement": (
         "Does nothing, silently, when GetArrangementList() is empty -- which is how the "
@@ -124,7 +153,18 @@ NOTES: dict[str, str] = {
         "ImportExportOption.bAddArrangementPoints = True does not add any. An imported "
         "avatar can carry them (109 named points on the measured scene), so read the "
         "list rather than assuming either way. Without points a garment still drafts, "
-        "sews and simulates; it just falls instead of draping on the body."
+        "sews and simulates; it just falls instead of draping on the body. With points, "
+        "it puts the piece's 2D bounding-box centre on the point and maps 2D +y to 3D "
+        "up. A point is not where its name says: points sit on bounding volumes sized by "
+        "the whole avatar, so on one with a long tail Body_Back_Center_1 put a piece near "
+        "z = -1150, a metre behind a back surface at z = -116. Resolve the point's world "
+        "position rather than trusting its name, and read where the piece landed."
+    ),
+    "utility_api.ResetClothArrangement": (
+        "Re-places every piece at its arrangement point, applying offsets written by "
+        "SetArrangementPosition -- and discarding any drape. Does not apply a pattern "
+        "JSON's arrangement offsets: run after importing a piece whose fOffSetY had been "
+        "set to -300, it left the piece where it was."
     ),
     "pattern_api.GetArrangementList": (
         "Read this before arranging anything: an empty list means there is nowhere to "
@@ -132,7 +172,8 @@ NOTES: dict[str, str] = {
         "answer. The shipped Genesis8_Female.avt loads with none and "
         "ImportExportOption.bAddArrangementPoints = True does not add any, while an "
         "imported avatar measured 109 named points -- so it is worth reading, not "
-        "assuming."
+        "assuming. A name is not a position: on a tailed avatar the Body_* points "
+        "measured up to a metre off the body -- see SetArrangement."
     ),
     "pattern_api.GetArrangementOfPattern": (
         "Answers a full-looking record ('ArrangementName': 'Arrangement Point', offsets "
@@ -142,8 +183,9 @@ NOTES: dict[str, str] = {
         "whether an arrangement happened."
     ),
     "pattern_api.SetArrangementOrientation": (
-        "Degrees, and the default is 180, not 0. Unlike SetArrangementPosition it really "
-        "moves the piece."
+        "Degrees, and the default is 180, not 0. It re-places the piece at its point, so "
+        "calling it with the current value is how a SetArrangementPosition takes effect "
+        "for one piece."
     ),
     "pattern_api.SetArrangementShapeStyle": "Accepts only 'Flat' and 'Curved'.",
     "import_api.ImportAvatar": (
@@ -175,7 +217,22 @@ NOTES: dict[str, str] = {
     "fabric_api.AddFabric": (
         "Takes a file path to a .zfab, not a name. Handed a plain string it adds nothing, "
         "raises nothing and returns 0 -- indistinguishable from having added a fabric at "
-        "index 0. Check GetFabricStyleNameList() afterwards."
+        "index 0. Check GetFabricStyleNameList() afterwards. Presets ship as .zfab: about "
+        "70 in C:/Users/Public/Documents/MarvelousDesigner/New Assets/Fabric (V2_Woven_*, "
+        "V2_Cut_Sew_Knit_*, Elastic/ and more) and fusibles in <MD install>/Preset/Bond. "
+        "Loading one is the only way to change how a fabric behaves -- no call sets "
+        "stretch, bending or density."
+    ),
+    "fabric_api.GetFabricInformation": (
+        "Metadata only, as strings: Classification, Color, ColorCode, Content, Owner, "
+        "Print, SupplierName, Texture, Thickness ('0.5 mm'), Weight ('300 g/m2'). No "
+        "stretch, bending or density, and no call anywhere sets them: a fabric's "
+        "behaviour changes only by loading a preset .zfab with AddFabric."
+    ),
+    "fabric_api.GetFabricInfo": (
+        'Not the fabric\'s properties: it answered {"rollWidth": 44, "styleChipList": []} '
+        "and nothing else. GetFabricInformation has the metadata; nothing has the "
+        "physics."
     ),
     "fabric_api.SetFabricPBRMaterialBaseColor": (
         "DANGER: a side index of 1 ended the MD process outright -- no dialog, no "
@@ -247,8 +304,10 @@ NOTES: dict[str, str] = {
     # -- Seeing the scene ------------------------------------------------------------
     "utility_api.SetCamViewPoint": (
         "This is the one that moves the 3D camera -- use it, not SetViewPoint, to see "
-        "the back of a garment. 0..7 give eight distinct views. Follow with "
-        "Refresh3DWindow before a snapshot."
+        "the back of a garment. 0 bottom, 1 three-quarter right, 2 front, 3 "
+        "three-quarter left, 4 right, 5 top, 6 left, 8 back; 7 zooms in and 9 zooms to "
+        "fit, keeping the current direction (measured 2026-10-11, matching MD's docs). "
+        "Follow with Refresh3DWindow before a snapshot."
     ),
     "utility_api.SetViewPoint": (
         "Does NOT move the camera; measured PNG-size spread 0.0% across every value. "
@@ -285,7 +344,20 @@ NOTES: dict[str, str] = {
         "Pass the ImportExportOption overload. The bare-path form ExportOBJ(path) gave no "
         "reply in 300s and wrote zero bytes on a scene the two-argument form exported in "
         "4.7s and 108MB. The exported group names also say what every surface really is, "
-        "which is the fastest way to tell a pattern piece from generated geometry."
+        "which is the fastest way to tell a pattern piece from generated geometry. The "
+        "returned [.obj, .mtl] paths are not evidence of a write: into a folder that did "
+        "not exist it returned both and wrote nothing, and after os.makedirs the same "
+        "call wrote both. Check the files. Output is millimetres, Y up, +Z the avatar's "
+        "front; bExportAvatar=True with bExportGarment=False exports the avatar alone, "
+        "and parsing an export is the only route found to an avatar's size or a piece's "
+        "3D bounds."
+    ),
+    "utility_api.GetClothPositions": (
+        "Cannot return anything to Python: its C++ side fills a std::vector<float>&, "
+        "pybind11 hands it a copy of the list, and the list passed in is not filled in -- "
+        "the call returns None. Nothing found in the six modules reports a piece's 3D "
+        "bounds or an avatar's size; ExportOBJ with its option object, then parse the "
+        "file."
     ),
     # -- Destructive and one-way -----------------------------------------------------
     "utility_api.NewProject": (
@@ -327,8 +399,8 @@ NOTES: dict[str, str] = {
         "[0] of both lists is a header ({'Point count': '8'}) rather than data: iterate "
         "from 1 or every piece gains a phantom point and a phantom line. PointList holds "
         "only the straight points -- a 7-point contour with 3 spline points reports 4 -- "
-        "so a sampled curve's interior cannot be read back at all. 'Line type' is "
-        "'Straight type' for a straight line and '' for a curved one."
+        "so a sampled curve's interior is not here; ExportPatternJSON carries it. 'Line "
+        "type' is 'Straight type' for a straight line and '' for a curved one."
     ),
     "pattern_api.GetPatternPieceSolidifyStrengthen": (
         "Not broken: 534070.75 is the value for 'never set'. All six setters round-trip."
@@ -340,10 +412,18 @@ NOTES: dict[str, str] = {
         "setter anywhere in the six modules. A seam there is an arc-length span, not a "
         "line index. MD validates none of what it reads -- an invented field name was "
         "accepted and the omitted fields read from uninitialised memory -- so edit a "
-        "document MD exported rather than authoring one from nothing."
+        "document MD exported rather than authoring one from nothing. Each piece's "
+        "ArrangementPointDataMap holds {PointName, fOffSetX, fOffSetY, fAngle}, and the "
+        "offsets do not survive ImportPatternJSON: fOffSetY = -300 left the piece's 3D "
+        "bounding box identical to the mm and re-exported as 0.0. Curve interiors are "
+        "here, type-2 points as PointType 'Polyline', where GetPatternInputInformation "
+        "drops them."
     ),
     "pattern_api.ImportPatternJSON": (
-        "Replaces the open scene rather than adding to it. The round trip measured "
+        "Replaces the open scene rather than adding to it, but not all of it: the avatar "
+        "stays, and the fabric is added a second time -- GetFabricStyleNameList went from "
+        "['FABRIC 1'] to ['FABRIC 1', 'FABRIC 1']. Check the fabric list after an import. "
+        "ArrangementPointDataMap offsets are discarded. The round trip otherwise measured "
         "clean: names, seam groups and a 360mm edge all came back exact."
     ),
     "export_api.ExportZPrj": (
@@ -417,18 +497,24 @@ NOTES: dict[str, str] = {
     ),
     # -- Environment -----------------------------------------------------------------
     "utility_api.RegisterPythonScriptFolder": (
-        "Takes a name and a directory, and is unexercised -- whether it makes a submenu "
-        "or loose entries is unknown. The registration constraint on "
-        "RegisterPythonScript applies: run it from a top-level Run in MD's Python "
-        "Editor, never from a script nested inside another. Nothing anywhere "
-        "unregisters, and nothing reads the plugin list back, so a registration is "
-        "permanent from the API's side."
+        "Unexercised -- whether it makes a submenu or loose entries is unknown, and its "
+        "argument order is unmeasured: RegisterPythonScript turned out to take the path "
+        "first, so do not assume (name, folder). MD logs every registration attempt and "
+        "its reason in C:/Users/Public/Documents/MarvelousDesigner/New Assets/"
+        "api_plugin_log.txt. Nothing in the API unregisters; the list itself is "
+        "C:/Users/Public/Documents/MarvelousDesigner/Plugins/pluginSettings.json, "
+        "written when MD exits."
     ),
     "utility_api.RegisterPythonScript": (
-        "Declared -> bool, and answers False for every name and path when called from a "
-        "script running inside another one -- which is what a call over this bridge "
-        "always is. Register from a top-level Run in MD's Python Editor instead, and "
-        "never record the False as success."
+        "PATH FIRST: (path, title). Called as (title, path), MD's plugin log "
+        "(C:/Users/Public/Documents/MarvelousDesigner/New Assets/api_plugin_log.txt) "
+        "reported 'the script path is invalid: <install folder>/<title>' and it "
+        "returned False -- which was long misread here as MD refusing calls made from "
+        "inside another script. It also returns False, logging 'already registered', "
+        "for a path it already has whatever the title, and once for a new script in an "
+        "already-registered script's folder (cause unknown). Read the log, check the "
+        "bool, and read Plugins/pluginSettings.json beside it, written on exit, for "
+        "what was actually registered. Measured 2026-10-11, 2026.0.315."
     ),
 }
 

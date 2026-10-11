@@ -15,9 +15,9 @@ inside MD:
   this build script may well be run on something newer. A 3.12-ism gets through every
   test on the build machine and fails at the only moment that matters -- in MD, in
   front of a user, with the traceback in a window they have to go and find.
-* **An import of anything that is not stdlib or MD's own modules.** The listener is
-  handed to MD as one file; there is nowhere for a dependency to come from. A
-  ``import requests`` here would install fine and die on click.
+* **An import of anything that is not stdlib or MD's own modules.** MD is handed the
+  listener and its Stop script as bare files; there is nowhere for a dependency to come
+  from. A ``import requests`` here would install fine and die on click.
 * **A missing stamp.** If the placeholders are gone, the zip would carry a listener
   claiming to be a source checkout, and ``md_status`` would report that forever.
 
@@ -57,9 +57,12 @@ VERSION_PLACEHOLDER = '__version__ = "0.0.0+source"'
 BUILD_PLACEHOLDER = 'BUILD = "source checkout"'
 
 #: Everything that goes in the zip, as {name in the package: file in the repo}. The
-#: listener is stamped on the way through; the rest are copied verbatim.
+#: listener is stamped on the way through; the rest are copied verbatim. Every ``.py``
+#: is something MD runs -- the listener is Start MCP, md_mcp_stop.py is Stop MCP -- so
+#: every one is checked the same way.
 PAYLOAD = {
     "md_mcp_listener.py": "plugin/md_mcp_listener.py",
+    "md_mcp_stop.py": "plugin/md_mcp_stop.py",
     "install.ps1": "plugin/install.ps1",
     "README.md": "plugin/README.md",
 }
@@ -141,7 +144,7 @@ def check_runs_in_md(source: str, name: str) -> None:
     if outside:
         raise BuildError(
             f"{name} imports {outside}, which is neither standard library nor a module "
-            "MD injects. MD is handed this one file and nothing else, so there is "
+            "MD injects. MD is handed the plugin's files and nothing else, so there is "
             "nowhere for that to come from -- it would install cleanly and fail on the "
             "first click. This is deliberately absolute: an optional import, even one "
             "in a try/except that falls back, is a thing that behaves differently on "
@@ -165,6 +168,7 @@ def contents(
         text = path.read_text(encoding="utf-8")
         if name == ENTRY:
             text = stamp(text, version, commit)
+        if name.endswith(".py"):
             check_runs_in_md(text, name)
         # LF regardless of the platform building it: MD reads the file as text, and a
         # zip whose bytes depend on the build host cannot be checked against a

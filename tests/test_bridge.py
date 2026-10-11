@@ -15,7 +15,7 @@ import time
 import pytest
 
 from md_mcp import bridge
-from tests.fake_md_host import free_port, running_listener, stop_listener
+from tests.fake_md_host import free_port, load_stopper, running_listener, stop_listener
 
 BUILD_A_SQUARE = """
 import pattern_api
@@ -173,9 +173,8 @@ def test_only_one_request_at_a_time_runs_inside_md(md) -> None:
 def test_a_shutdown_waits_for_the_build_in_front_of_it(md) -> None:
     # One thread, one request at a time: a shutdown arriving mid-build is answered when
     # the build ends, not before. Worth pinning down because it is the price of serving
-    # on MD's main thread, and because the thing that used to need a prompt shutdown --
-    # re-running the listener -- no longer goes through the socket at all
-    # (test_a_second_run_stops_the_listener_without_the_socket).
+    # on MD's main thread; Stop MCP does not go through the socket at all
+    # (test_stop_mcp_stops_the_listener_and_start_mcp_brings_it_back).
     building = threading.Thread(
         target=bridge.run_script, args=("import time\ntime.sleep(0.8)",), daemon=True
     )
@@ -190,46 +189,120 @@ def test_a_shutdown_waits_for_the_build_in_front_of_it(md) -> None:
     building.join(10)
 
 
-def test_a_second_run_stops_the_listener_without_the_socket(monkeypatch) -> None:
-    # Inside MD the second run executes *nested inside* the first one's serve loop, so
-    # the first cannot answer a shutdown, or let go of its port, until the second
-    # returns. Anything that waits on the socket here deadlocks. Setting a flag the
-    # running loop will see when it resumes is the only order that works, so start()
-    # must stop rather than replace, and must say so rather than appear to have bound.
+def test_starting_returns_and_leaves_the_timer_serving(monkeypatch) -> None:
+    # The whole point of the timer: the Run that starts the bridge finishes, so nothing
+    # holds MD's main thread between requests and closing MD can end the process.
     shared: dict = {}
 
     with running_listener(monkeypatch, namespace=shared):
-        port = bridge.port()
+        state = shared["running"]()
+
+        assert state is not None and state["timer"] is not None
+        for _ in range(3):
+            assert bridge.ping()["ok"]
+        assert state["requests"] >= 3
+
+
+def test_a_second_start_leaves_the_first_serving(monkeypatch) -> None:
+    # A second click on Start MCP must not drop what the first is serving, nor bind a
+    # second socket beside it.
+    shared: dict = {}
+
+    with running_listener(monkeypatch, namespace=shared):
+        first = shared["running"]()
+
+        again = shared["start"](timer=shared["_ThreadTimer"])
+
+        assert again is first
         assert bridge.ping()["ok"]
 
-        assert shared["start"](block=False) is None, "the second run bound a port"
 
-        for _ in range(100):  # it stops when the loop next comes round
-            if _port_closed(port):
-                break
-            time.sleep(0.05)
-        else:
-            pytest.fail("the listener kept serving after a second run")
-
-
-def test_a_third_run_starts_a_fresh_listener(monkeypatch) -> None:
-    # The other half of that contract: once the stopped one has let go, running it
-    # again must serve. Without this, "run it once more" is advice nobody has checked.
+def test_stop_mcp_stops_the_listener_and_start_mcp_brings_it_back(monkeypatch) -> None:
+    # Stop MCP is a separate script that cannot import the listener -- running that file
+    # is Start -- so it finds the listener on builtins and stops it there. Starting
+    # again must then serve: without this, Stop is a one-way door.
     shared: dict = {}
 
-    with running_listener(monkeypatch, namespace=shared):
+    with running_listener(monkeypatch, namespace=shared) as host:
         port = bridge.port()
-        shared["start"](block=False)
-        for _ in range(100):
-            if _port_closed(port):
-                break
-            time.sleep(0.05)
+        stopper = load_stopper({})
 
-        shared["start"](block=False)
+        stopper["main"]()
+
+        assert _port_closed(port), "Stop MCP left the port open"
+        assert shared["running"]() is None
+        assert any("stopped listening" in box for box in host.message_boxes)
+
+        shared["start"](timer=shared["_ThreadTimer"])
         try:
             assert bridge.ping()["md_version"] == "2026.0.315"
         finally:
             stop_listener(port)
+
+
+def test_stop_mcp_with_nothing_running_says_so(monkeypatch) -> None:
+    with running_listener(monkeypatch) as host:
+        stopper = load_stopper({})
+        stopper["main"]()
+        host.message_boxes.clear()
+
+        stopper["main"]()
+
+    assert host.message_boxes == ["md-mcp: nothing to stop -- the bridge was not listening."]
+
+
+def test_a_shutdown_request_stops_the_timer_too(monkeypatch) -> None:
+    # Closing the port and leaving the timer ticking would be a listener that costs MD
+    # a call every few milliseconds for the rest of the session, serving nothing.
+    shared: dict = {}
+
+    with running_listener(monkeypatch, namespace=shared):
+        state = shared["running"]()
+        stop_listener(bridge.port())
+
+        # The reply goes out first and the timer is killed as that tick ends.
+        deadline = time.time() + 5
+        while not state["stopped"] and time.time() < deadline:
+            time.sleep(0.01)
+        assert state["stopped"] and state["timer"] is None
+        ticks = state["ticks"]
+        time.sleep(0.1)
+        assert state["ticks"] == ticks, "the timer kept ticking after the shutdown"
+
+
+def test_a_tick_inside_a_tick_does_nothing(monkeypatch) -> None:
+    # An MD call made while a request is served can pump MD's message queue -- a modal
+    # dialog does -- and the timer fires inside it. A nested tick that served would run
+    # a second request in the middle of the first, and MD is not re-entrant.
+    import builtins
+
+    shared: dict = {}
+    # The script is the request being served. It opens a second connection while it
+    # runs, so that request can only be served by the tick it calls -- and must not be.
+    script = (
+        "import builtins, socket, time\n"
+        "tick, state, port = builtins.__md_mcp_test_tick__\n"
+        "before = state['requests']\n"
+        "waiting = socket.create_connection(('127.0.0.1', port), timeout=2.0)\n"
+        "waiting.sendall(b'{\"op\": \"ping\"}\\n')\n"
+        "time.sleep(0.05)\n"
+        "tick(state)\n"
+        "print(state['requests'] - before)\n"
+        "waiting.close()\n"
+    )
+
+    with running_listener(monkeypatch, namespace=shared):
+        state = shared["running"]()
+        monkeypatch.setattr(
+            builtins,
+            "__md_mcp_test_tick__",
+            (shared["_tick"], state, bridge.port()),
+            raising=False,
+        )
+
+        served_inside = int(bridge.run_script(script)["output"].strip())
+
+    assert served_inside == 0, "a tick inside a running request served another request"
 
 
 def _port_closed(port: int) -> bool:
@@ -452,16 +525,12 @@ def test_empty_api_search_lists_names_without_signatures(md) -> None:
     ]
 
 
-def test_run_does_not_repeat_an_unchanged_piece_list(md) -> None:
-    # Measured on a 58-piece garment: a run whose output was two characters returned
-    # 2,770, of which 2,500 were the piece list from the reply before it.
+def test_run_always_returns_a_self_contained_piece_list(md) -> None:
     first = bridge.run_script(BUILD_A_SQUARE)
-    assert isinstance(first["pieces"], list)
-
     second = bridge.run_script("print('nothing changed')")
-    assert second["pieces_unchanged"] is True
-    assert not isinstance(second["pieces"], list)
-    # The numbers worth checking are scalars and must survive.
+    assert isinstance(second["pieces"], list)
+    assert second["pieces"] == first["pieces"]
+    assert not second.get("pieces_unchanged")
     assert second["pattern_count"] == first["pattern_count"]
     assert "seam_group_count" in second
 
@@ -507,7 +576,7 @@ def test_a_failure_names_the_listener_build_that_raised_it(md) -> None:
     message = str(failure.value)
     assert "division by zero" in message
     assert "raised by md-mcp listener" in message
-    assert "Stop and Start it" in message
+    assert "Stop MCP and then Start MCP" in message
 
 
 def test_a_run_can_be_given_its_own_deadline(md) -> None:

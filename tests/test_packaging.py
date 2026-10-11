@@ -12,10 +12,10 @@ its version stamped in, and a copy is not covered by having tested the original.
 packaged file is unzipped and served against the fake MD host, exactly as
 ``tests/test_bridge.py`` does to the checkout's copy.
 
-**The window is driven, not drawn.** The control window has no event loop of its own --
-the serve loop calls its ``tick`` -- so the loop can be tested against a window that
-records instead of drawing, buttons and all. What that cannot show is a window opening
-inside MD, which only a live MD can.
+**Start and Stop are clicked, not drawn.** Start MCP is the listener's ``main()`` and
+Stop MCP is ``md_mcp_stop.py``; both run here against the fake MD, with the timer
+ticked by a thread. What that cannot show is a Windows timer firing inside MD, which
+only a live MD can.
 
 What none of it proves is that Marvelous Designer accepts any of this: nothing here has
 an MD. ``utility_api.RegisterPythonScript`` is faked, and the fake says yes.
@@ -38,6 +38,7 @@ from tests.fake_md_host import (
     fake_md,
     free_port,
     load_listener,
+    load_stopper,
     running_listener,
     stop_listener,
 )
@@ -110,7 +111,13 @@ def test_the_package_holds_everything_an_install_needs(package: pathlib.Path) ->
     with zipfile.ZipFile(package) as archive:
         names = {pathlib.PurePosixPath(n).name for n in archive.namelist()}
 
-    assert names == {"md_mcp_listener.py", "install.ps1", "README.md", "manifest.json"}
+    assert names == {
+        "md_mcp_listener.py",
+        "md_mcp_stop.py",
+        "install.ps1",
+        "README.md",
+        "manifest.json",
+    }
 
 
 def test_the_listener_says_which_version_and_commit_it_is(package: pathlib.Path) -> None:
@@ -203,6 +210,18 @@ def test_mds_own_modules_are_not_mistaken_for_missing_dependencies() -> None:
     )
 
 
+def test_the_stop_script_is_held_to_the_same_rules(tmp_path: pathlib.Path) -> None:
+    # Stop MCP is run by MD exactly as Start MCP is, so an import MD cannot supply
+    # fails on the click just the same.
+    (tmp_path / "plugin").mkdir()
+    for name in ("md_mcp_listener.py", "install.ps1", "README.md"):
+        (tmp_path / "plugin" / name).write_bytes((ROOT / "plugin" / name).read_bytes())
+    (tmp_path / "plugin" / "md_mcp_stop.py").write_text("import requests\n")
+
+    with pytest.raises(build_plugin.BuildError, match="md_mcp_stop.py imports"):
+        build_plugin.contents("1.2.3", COMMIT, root=tmp_path)
+
+
 def test_a_listener_with_nothing_to_stamp_is_not_packaged() -> None:
     with pytest.raises(build_plugin.BuildError, match="__version__"):
         build_plugin.stamp("print('hello')\n", "1.2.3", COMMIT)
@@ -244,7 +263,23 @@ def test_the_checkouts_listener_admits_it_is_not_a_release(monkeypatch) -> None:
     assert reply["plugin_build"] == "source checkout"
 
 
-# --------------------------------------------------------------- the Plugin tab entry
+def test_the_packaged_stop_entry_stops_the_packaged_listener(
+    monkeypatch, unpacked: pathlib.Path
+) -> None:
+    shared: dict = {}
+
+    with running_listener(
+        monkeypatch, namespace=shared, listener=unpacked / "md_mcp_listener.py"
+    ) as host:
+        port = bridge.port()
+        load_stopper({}, unpacked / "md_mcp_stop.py")["main"]()
+
+        assert _wait_until_silent(), "the packaged Stop MCP left the port open"
+        assert shared["running"](port) is None
+        assert any("stopped listening" in box for box in host.message_boxes)
+
+
+# -------------------------------------------------------------- the Plugin tab entries
 
 
 @pytest.fixture
@@ -260,15 +295,18 @@ def _register(namespace, tmp_path, **kwargs):
     )
 
 
-def test_registering_puts_this_one_file_in_mds_plugin_tab(listener, tmp_path) -> None:
-    # One entry, not three. MD's Plug-in Manager adds one .py at a time and MD has no
-    # call that removes one, so every entry is something a person adds by hand if the
-    # API refuses, and can never take back.
+def test_registering_puts_start_and_stop_in_mds_plugin_tab(listener, tmp_path) -> None:
+    # Two entries and no more. MD's Plug-in Manager adds one .py at a time and MD has no
+    # call that removes one, so every entry is something a person may add by hand if
+    # the API refuses, and can only take back in Plug-in Manager.
     host, namespace = listener
 
     message = _register(namespace, tmp_path)
 
-    assert host.registered == [("md-mcp", str(LISTENER))]
+    assert host.registered == [
+        ("Start MCP", str(LISTENER)),
+        ("Stop MCP", str(LISTENER.with_name("md_mcp_stop.py"))),
+    ]
     assert "Plugin tab" in message
 
 
@@ -280,14 +318,14 @@ def test_registering_twice_asks_md_once(listener, tmp_path) -> None:
     _register(namespace, tmp_path)
     message = _register(namespace, tmp_path)
 
-    assert len(host.registered) == 1
+    assert len(host.registered) == 2
     assert "already in MD's Plugin tab" in message
 
 
 def test_an_entry_md_declines_is_reported_and_not_recorded(listener, tmp_path) -> None:
     # Measured on 2026.0.315: RegisterPythonScript answers False -- registering
-    # nothing, raising nothing -- for every call made from a script running inside
-    # another one. Recording that as success means never offering the entry again.
+    # nothing, raising nothing -- for an invalid path or one it already has.
+    # Recording that as success means never offering the entry again.
     host, namespace = listener
     host.registration_result = False
 
@@ -325,247 +363,93 @@ def test_a_listener_with_no_path_registers_nothing(monkeypatch, tmp_path) -> Non
     assert "no __file__" in message
 
 
-# --------------------------------------------------------------- the control window
+def test_a_listener_without_its_stop_script_registers_start_and_says_so(
+    monkeypatch, tmp_path
+) -> None:
+    # A Stop MCP entry pointing at a file that is not there is a button that fails
+    # when clicked, so it is not registered -- and the missing file is named.
+    lonely = tmp_path / "plugin" / "md_mcp_listener.py"
+    lonely.parent.mkdir()
+    lonely.write_bytes(LISTENER.read_bytes())
+
+    with fake_md(monkeypatch) as host:
+        namespace = load_listener({}, lonely)
+
+        message = _register(namespace, tmp_path)
+
+    assert host.registered == [("Start MCP", str(lonely))]
+    assert "md_mcp_stop.py" in message
 
 
-class FakePanel:
-    """A control window that records instead of drawing one.
-
-    Buttons are *queued* and pressed inside ``tick``, because that is where Tk fires
-    them: the loop calls ``update()``, and the callbacks run there, on the loop's own
-    thread. A test that called start_serving directly would be testing something that
-    cannot happen inside MD.
-    """
-
-    def __init__(self, state, namespace):
-        self._state = state
-        self._namespace = namespace
-        self._pending: list[str] = []
-        self.ticks = 0
-        self.raised = 0
-        self.closed = False
-
-    def press(self, button: str) -> None:
-        self._pending.append(button)
-
-    def user_closes(self) -> None:
-        self.closed = True
-
-    # ------------------------------------------------ what the loop calls
-
-    def tick(self) -> bool:
-        while self._pending:
-            button = self._pending.pop(0)
-            self._namespace["start_serving" if button == "start" else "stop_serving"](
-                self._state
-            )
-        self.ticks += 1
-        return not self.closed
-
-    def raise_window(self) -> None:
-        self.raised += 1
-
-    def close(self) -> None:
-        self.closed = True
+# ------------------------------------------------------------ clicking Start and Stop
 
 
 @contextlib.contextmanager
-def panelled_listener(monkeypatch, factory=None, press_start=True):
-    """The listener running with a control window, on a port of its own.
+def clicked_start(monkeypatch, tmp_path):
+    """MD running Start MCP: ``main()``, with a timer a test runner can drive.
 
-    With a window, opening the plugin no longer opens the port -- Start does -- so the
-    default here is to press it, which is what a person does a second after the window
-    appears. ``press_start=False`` leaves it idle.
+    LOCALAPPDATA is pointed at the test's own folder, because main() records what it
+    registered there, and a test must never write to the real record.
     """
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
     with fake_md(monkeypatch) as host:
         namespace = load_listener({})
+        namespace["_default_timer"] = lambda: namespace["_ThreadTimer"]
         port = free_port()
+        namespace["PORT"] = port
         monkeypatch.setenv("MD_MCP_PORT", str(port))
-        panels: list[FakePanel] = []
-
-        def make(state):
-            panel = FakePanel(state, namespace) if factory is None else factory(state)
-            if panel is not None:
-                panels.append(panel)
-            return panel
-
-        thread = namespace["start"](block=False, port=port, panel_factory=make)
         try:
-            if press_start:
-                _wait_for_panel(panels)
-                panels[0].press("start")
-                # free_port() only proves the port was free a moment ago, and with a
-                # window a port that is taken is reported rather than raised -- so the
-                # symptom is this timing out, in whichever test happened to be running.
-                try:
-                    _wait_for_ping()
-                except bridge.BridgeError as exc:
-                    raise AssertionError(
-                        "the listener never answered on {}: {}".format(
-                            port, panels[0]._state["last"] or exc
-                        )
-                    ) from exc
-            yield host, namespace, panels, port
+            yield host, namespace, port
         finally:
             stop_listener(port)
-            for panel in panels:
-                panel.closed = True
-            thread.join(timeout=5)
 
 
-def _wait_for_panel(panels, timeout: float = 5.0):
-    """Wait for the loop to build its window. It does that on its first tick."""
-    deadline = time.time() + timeout
-    while not panels and time.time() < deadline:
-        time.sleep(0.02)
-    assert panels, "the loop never built a window"
-    return panels[0]
-
-
-def test_the_window_opens_without_listening(monkeypatch) -> None:
-    # Opening the plugin opens the window and nothing else. Clicking a thing called
-    # md-mcp should not put a port on the network by itself -- and the bridge runs
-    # arbitrary Python inside MD, so "by itself" is the part that matters.
-    with panelled_listener(monkeypatch, press_start=False) as (_, _, panels, _):
-        _wait_for_panel(panels)
-        deadline = time.time() + 0.5
-        while time.time() < deadline:
-            with pytest.raises(bridge.BridgeError):
-                bridge.ping()
-            time.sleep(0.05)
-
-        assert panels and panels[0].ticks, "the window should be up and refreshing"
-        assert panels[0]._state["last"] == "press Start to listen"
-
-
-def test_start_in_the_window_is_what_opens_the_port(monkeypatch) -> None:
-    with panelled_listener(monkeypatch, press_start=False) as (_, _, panels, _):
-        _wait_for_panel(panels).press("start")
+def test_start_mcp_registers_both_entries_listens_and_returns(
+    monkeypatch, tmp_path
+) -> None:
+    with clicked_start(monkeypatch, tmp_path) as (host, namespace, port):
+        assert namespace["main"]() is None  # it returns: the timer does the serving
 
         assert _wait_for_ping()["ok"]
+        assert [name for name, _ in host.registered] == ["Start MCP", "Stop MCP"]
+        # Said where it will be seen, with the entries' news, in one box.
+        assert len(host.message_boxes) == 1
+        assert "listening on 127.0.0.1:{}".format(port) in host.message_boxes[0]
+        assert "Start MCP" in host.message_boxes[0]
 
 
-def test_without_a_window_it_listens_immediately(monkeypatch) -> None:
-    # The other half of that rule: with no window there is no Start to press, so a
-    # plugin that waited for one would do nothing at all for ever.
-    with running_listener(monkeypatch):
-        assert bridge.ping()["ok"]
-
-
-def test_the_window_opens_and_start_makes_it_serve(monkeypatch) -> None:
-    with panelled_listener(monkeypatch) as (_, _, panels, _):
-        assert bridge.ping()["ok"]
-
-        assert len(panels) == 1, "the loop should build exactly one window"
-        assert panels[0].ticks, "the window is refreshed by the serve loop, not itself"
-
-
-def _wait_for_tick(panel, before: float, timeout: float = 5.0) -> bool:
-    """Whether the loop goes round again. It sleeps POLL_INTERVAL between ticks, so a
-    loaded runner can put a scheduling gap between the last bridge call and the next
-    tick -- reading the counter in the same instant tests the runner, not the loop."""
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        if panel.ticks > before:
-            return True
-        time.sleep(0.02)
-    return False
-
-
-def test_stop_in_the_window_closes_the_port_and_keeps_the_window(monkeypatch) -> None:
-    with panelled_listener(monkeypatch) as (_, _, panels, _):
-        panel = panels[0]
-        before = panel.ticks
-
-        panel.press("stop")
-
-        assert _wait_until_silent(), "Stop left the port open"
-        assert not panel.closed
-        assert _wait_for_tick(panel, before), "the loop stopped running when the bridge did"
-
-
-def test_start_in_the_window_binds_the_port_again(monkeypatch) -> None:
-    # The whole point of a window over a toggle: stopping is not the end of the script,
-    # so starting again is a button rather than a paste.
-    with panelled_listener(monkeypatch) as (_, _, panels, _):
-        panel = panels[0]
-        panel.press("stop")
-        assert _wait_until_silent()
-
-        panel.press("start")
-
-        assert _wait_for_ping()["ok"]
-
-
-def test_closing_the_window_leaves_the_bridge_serving(monkeypatch) -> None:
-    # A control panel, not a leash. Somebody tidying their desktop must not take the
-    # bridge down with the window.
-    with panelled_listener(monkeypatch) as (_, _, panels, _):
-        panels[0].user_closes()
-
-        time.sleep(0.2)
-        assert bridge.ping()["ok"]
-
-
-def test_closing_the_window_with_nothing_serving_ends_the_script(monkeypatch) -> None:
-    # And the other way: a script with nothing to do must return. MD only runs Python
-    # while a script is running, so a loop with no socket and no window is holding MD's
-    # main thread for nobody.
-    with fake_md(monkeypatch):
-        namespace = load_listener({})
-        port = free_port()
-        monkeypatch.setenv("MD_MCP_PORT", str(port))
-        panels: list[FakePanel] = []
-
-        def make(state):
-            panels.append(FakePanel(state, namespace))
-            return panels[-1]
-
-        thread = namespace["start"](block=False, port=port, panel_factory=make)
-        _wait_for_panel(panels).press("start")
+def test_clicking_start_mcp_again_leaves_it_serving(monkeypatch, tmp_path) -> None:
+    with clicked_start(monkeypatch, tmp_path) as (host, namespace, _):
+        namespace["main"]()
         _wait_for_ping()
+        first = namespace["running"]()
+        host.message_boxes.clear()
 
-        panels[0].press("stop")
-        assert _wait_until_silent()
-        panels[0].user_closes()
+        namespace["main"]()
 
-        thread.join(timeout=5)
-
-    assert not thread.is_alive(), "the loop held the main thread with nothing to do"
-
-
-def test_running_it_again_brings_the_window_back(monkeypatch) -> None:
-    # A second run executes nested inside the first one's loop and can only leave a
-    # flag. With a window, the useful flag is "show yourself" -- the old behaviour,
-    # stopping, is what a Plugin tab click must not do.
-    with panelled_listener(monkeypatch) as (_, namespace, panels, port):
-        panels[0].user_closes()
-        time.sleep(0.2)
-
-        assert namespace["start"](port=port, panel_factory=lambda state: None) is None
-
-        deadline = time.time() + 5
-        while time.time() < deadline and len(panels) < 2:
-            time.sleep(0.02)
-        assert bridge.ping()["ok"], "running it again stopped the bridge"
-        assert len(panels) == 2, "running it again did not put a window back"
+        # The same listener, not a replacement that shut the first one down to bind.
+        assert namespace["running"]() is first
+        assert bridge.ping()["ok"]
+        # Nothing needs attention, so nothing to dismiss: a routine click costs no box.
+        assert host.message_boxes == []
 
 
-def test_a_window_that_will_not_open_still_serves(monkeypatch) -> None:
-    # tkinter is importable in MD 2026.0.315, but nothing here has watched a Tk window
-    # open inside MD. If it will not, the bridge is the half that matters.
-    def refuses(state):
-        state["panel_error"] = "no control window -- tkinter would not open one"
-        return None
+def test_start_mcp_with_the_port_taken_says_so(monkeypatch, tmp_path) -> None:
+    import socket
 
-    with panelled_listener(monkeypatch, factory=refuses, press_start=False) as (
-        host,
-        _,
-        _,
-        _,
-    ):
-        assert _wait_for_ping()["ok"]
+    def refuses(port):
+        raise RuntimeError("port {} is still in use and did not answer".format(port))
 
-    # Said where it will be seen: where a clicked plugin's print output goes is not
-    # known, so anything that decides whether the plugin is usable gets a message box.
-    assert any("no control window" in box for box in host.message_boxes)
+    with clicked_start(monkeypatch, tmp_path) as (host, namespace, port):
+        # Something that is not md-mcp holds the port and never answers a shutdown.
+        squatter = socket.socket()
+        squatter.bind(("127.0.0.1", port))
+        squatter.listen(1)
+        namespace["_stop_foreign"] = refuses
+        try:
+            namespace["main"]()
+        finally:
+            squatter.close()
+
+        assert namespace["running"]() is None
+        assert any("could not listen" in box for box in host.message_boxes)

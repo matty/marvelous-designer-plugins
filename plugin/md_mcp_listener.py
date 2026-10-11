@@ -1,52 +1,55 @@
 """md-mcp listener — the live bridge, run inside Marvelous Designer.
 
-One file, one entry in MD's Plugin tab, one small window with Start and Stop in it.
+Two entries in MD's Plugin tab: **Start MCP** runs this file, and **Stop MCP** runs
+``md_mcp_stop.py`` beside it. There is no window.
 
-Nothing is imported that MD does not already have. The window is built on `user32`
-through `ctypes` -- the same DLL this file pumps MD's message queue with. MD's own UI is
-Qt and its three plugin-UI hooks are all out of reach from Python (see
-`docs/md-conventions.md`); a matching PySide6 *can* be installed into MD's interpreter
-and does bind to MD's Qt, but stock Qt widgets in MD's palette still do not look like
-MD, and it is not worth ninety megabytes inside MD to find that out again.
+Start opens a loopback port, arms a Windows timer that serves it, and **returns**. From
+then on Windows calls the timer from MD's own message loop, on MD's main thread, every
+few milliseconds for as long as MD runs; each tick accepts what has arrived, answers any
+request that is complete, and gives the thread straight back. Stop kills the timer and
+closes the port. Closing MD ends the process as it should, because nothing is holding
+MD's main thread in between.
 
-Click **md-mcp** in the Plugin tab if it has been registered there, or run the two-line
-bootstrap from the README in **Main Menu > Plugins > Python Editor**. Either opens the
-control window; **Start** is what opens the port. The first top-level run also registers
-the entry, so every session after it is a click (see `register_plugin`).
+Click **Start MCP** in the Plugin tab if it has been registered there, or run the
+two-line bootstrap from the README in **Main Menu > Plugins > Python Editor**. The first
+top-level run also registers both entries, so every session after it is a click (see
+`register_plugin`).
 
-Opening the plugin does not put a port on the network. `run` executes arbitrary Python
-inside MD, so that wants a deliberate press rather than a side effect of curiosity about
-a menu entry. Where there is no window to press -- it could not be built -- the bridge
-opens itself and says so, since otherwise the plugin would do nothing at all.
+Starting is a click and never a side effect: `run` executes arbitrary Python inside MD,
+so the port opens because somebody asked for it.
 
-Closing the window does not stop the bridge -- it is a control panel, not a leash.
-Clicking **md-mcp** again brings it back.
+Why a timer, and not a thread or a loop
+---------------------------------------
+MD embeds CPython and only lets its threads run while a script is executing. The moment
+a script returns, the host stops releasing the GIL and **every Python thread freezes** —
+measured on 2026.0.315: a thread ticked 20 times while the main thread slept 2s, and not
+once after the script ended. A listener on a background thread therefore binds its port
+(so ``connect()`` succeeds) and then answers nothing: it looks connected and is dead.
 
-Why the loop is on MD's main thread
------------------------------------
-MD embeds CPython and only lets it run while a script is executing. The moment a script
-returns, the host stops releasing the GIL and **every Python thread freezes** — measured
-on 2026.0.315: a thread ticked 20 times while the main thread slept 2s, and not once
-after the script ended. A listener on a background thread therefore binds its port (so
-connections are accepted into the backlog and `connect()` succeeds) and then answers
-nothing, which is the worst failure shape available: it looks connected and is dead.
+Earlier versions of this file were a script that never returned, pumping MD's message
+queue between requests so that MD stayed usable. That worked, and it held MD's main
+thread for the whole session: closing MD left the process running behind it.
 
-So the serve loop *is* the script, and holds MD's main thread for the whole session. To
-keep MD usable it pumps MD's own Win32 message queue between requests — without that,
-Windows marks MD "not responding" after about four seconds (both halves measured; see
-`docs/adr/001-bridge-transport.md`). Every MD API call then happens on the main thread,
-which is also the only thread MD documents as safe.
-
-While a request is executing, the pump is not running, so MD is unresponsive for exactly
-as long as the work takes — the same as clicking Simulate in the UI.
+MD's API calls nothing back, but Windows does. A ``user32.SetTimer`` thread timer is
+dispatched by MD's own message loop after the script that armed it has returned —
+measured on 2026.0.315 (2026-10-11): 100 requests at a 31 ms median round trip, MD's API
+answering inside the callback, MD responsive throughout, and the process gone the moment
+MD was closed. Every MD call still happens on the main thread, the only one MD documents
+as safe. While a request is executing MD is unresponsive for exactly as long as the work
+takes, as it is when Simulate is clicked in the UI.
 
 Protocol: one JSON object per line in, one JSON object per line out, then the connection
 closes.
 
     {"op": "ping"}                       -> {"ok": true, "md_version": "...", ...}
     {"op": "scene"}                      -> {"ok": true, "pattern_count": n, "pieces": []}
-    {"op": "run", "source": "...python"} -> {"ok": true, "output": "...", + scene}
+    {"op": "run", "source": "...python"} -> {"ok": true, "output": "...", "writes": [],
+                                             + scene}
     {"op": "shutdown"}                   -> {"ok": true}
+
+``writes`` is always present in a ``run`` reply from this version on, empty when the script
+exported nothing, so a client can tell "nothing was written" from "this listener does not
+check" (see `_checking_writes`).
 
 Loopback only, and no authentication: anything that can reach 127.0.0.1 on this port can
 run Python inside MD. That is the same trust boundary as MD's own script menu.
@@ -55,10 +58,12 @@ run Python inside MD. That is the same trust boundary as MD's own script menu.
 import builtins
 import contextlib
 import ctypes
+import functools
 import io
 import json
 import os
 import socket
+import threading
 import time
 import traceback
 
@@ -80,22 +85,28 @@ PORT = int(os.environ.get("MD_MCP_PORT", "5121"))
 #: How long a connected peer has to finish sending its request line once it has started.
 REQUEST_TIMEOUT = 5.0
 
-#: How long a peer that has sent *nothing at all* is given before it is dropped. The loop
-#: is serial, so a peer that connects and then says nothing -- a port scanner, a stray
-#: browser tab -- holds the bridge for exactly this long, and giving it the whole
-#: REQUEST_TIMEOUT made that hold as long as the client's own ping timeout: the next real
-#: request would time out rather than queue. A client sends immediately after connecting
-#: (md_mcp.bridge does it in the next statement), so a second is already generous.
+#: How long a peer that has sent *nothing at all* is kept before it is dropped -- a port
+#: scanner, a stray browser tab. Peers are read a tick at a time, so a silent one no
+#: longer holds anybody up; this only stops them accumulating. A client sends
+#: immediately after connecting (md_mcp.bridge does it in the next statement), so a
+#: second is already generous.
 SILENT_PEER_TIMEOUT = 1.0
 
-#: How long the loop waits for a connection before pumping MD's message queue again.
-#: Short enough that MD's UI stays smooth, long enough that idling costs nothing.
-POLL_INTERVAL = 0.005
+#: How often the timer asks Windows to call it. Windows rounds a thread timer up to its
+#: clock tick, normally 15.6 ms, and 10 ms is the shortest it accepts at all.
+TICK_MS = 10
 
-#: Listener state lives on ``builtins`` so that a second run of this script finds the
-#: first one even though MD gives each run a fresh namespace. Keyed by port, because the
-#: tests run several listeners at once.
+#: Listener state lives on ``builtins`` so that a later run -- Stop MCP, or Start MCP
+#: clicked again -- finds it even though MD gives each run a fresh namespace. Keyed by
+#: port, because the tests run several listeners at once. ``md_mcp_stop.py`` reads the
+#: same name.
 _REGISTRY = "__md_mcp_listeners__"
+
+#: Every timer callback this process has handed to Windows, kept for good. A callback
+#: freed while Windows can still call it -- or while it is running, which is where a
+#: shutdown request kills its own timer -- is a call into freed memory, and that ends
+#: MD. One small object per Start is a price worth paying not to find out.
+_KEEP_ALIVE = "__md_mcp_timer_callbacks__"
 
 
 def _registry():
@@ -139,14 +150,13 @@ def _scene():
     groups and inspect the resulting scene. Avatars and fabrics are here too because
     they are what the next call depends on.
     """
-    count = pattern_api.GetPatternCount()
-    scene = {
-        "pattern_count": count,
-        "pieces": [
+    scene = {}
+    _readback(scene, "pattern_count", pattern_api.GetPatternCount)
+    if "pattern_count" in scene:
+        _readback(scene, "pieces", lambda: [
             {"index": index, "name": pattern_api.GetPatternPieceName(index)}
-            for index in range(count)
-        ],
-    }
+            for index in range(scene["pattern_count"])
+        ])
     _readback(scene, "seam_group_count", lambda: pattern_api.GetSeamlinePairGroupCount())
     _readback(scene, "avatars", lambda: list(__import__("export_api").GetAvatarNameList()))
     # Not GetFabricCount(), which answers 0 for a scene that plainly has a fabric in it
@@ -155,66 +165,6 @@ def _scene():
         scene, "fabrics", lambda: list(__import__("fabric_api").GetFabricStyleNameList())
     )
     return scene
-
-
-# --------------------------------------------------------------------------- the pump
-
-
-def _make_pump():
-    """A callable that drains this thread's Win32 message queue.
-
-    Returns False once MD has asked to quit, so the loop can let go of the main thread
-    and let MD shut down: our frame is *below* MD's event loop, and MD cannot finish
-    exiting until this script returns. Off Windows (the tests) there is no queue and no
-    main thread to block, so pumping is a no-op that never asks anyone to stop.
-    """
-    try:
-        user32 = ctypes.WinDLL("user32", use_last_error=True)
-    except (AttributeError, OSError):
-        return lambda: True
-
-    from ctypes import wintypes
-
-    class MSG(ctypes.Structure):
-        _fields_ = [
-            ("hwnd", wintypes.HWND),
-            ("message", wintypes.UINT),
-            ("wParam", wintypes.WPARAM),
-            ("lParam", wintypes.LPARAM),
-            ("time", wintypes.DWORD),
-            ("pt", wintypes.POINT),
-        ]
-
-    # Declared rather than left to ctypes' int-sized default: the handle and the
-    # W/LPARAMs are 64-bit here, and a truncated pointer dispatches into nothing.
-    user32.PeekMessageW.argtypes = [
-        ctypes.POINTER(MSG),
-        wintypes.HWND,
-        wintypes.UINT,
-        wintypes.UINT,
-        wintypes.UINT,
-    ]
-    user32.PeekMessageW.restype = wintypes.BOOL
-    user32.TranslateMessage.argtypes = [ctypes.POINTER(MSG)]
-    user32.DispatchMessageW.argtypes = [ctypes.POINTER(MSG)]
-    user32.PostQuitMessage.argtypes = [ctypes.c_int]
-
-    PM_REMOVE = 0x0001
-    WM_QUIT = 0x0012
-    message = MSG()
-
-    def pump():
-        while user32.PeekMessageW(ctypes.byref(message), None, 0, 0, PM_REMOVE):
-            if message.message == WM_QUIT:
-                # Put it back. MD's own loop resumes the moment we return and has to
-                # see the quit, or closing MD would leave the process running headless.
-                user32.PostQuitMessage(int(message.wParam))
-                return False
-            user32.TranslateMessage(ctypes.byref(message))
-            user32.DispatchMessageW(ctypes.byref(message))
-        return True
-
-    return pump
 
 
 # ------------------------------------------------------------------------ the handler
@@ -250,48 +200,210 @@ def _script_namespace(name):
     return namespace
 
 
+# ------------------------------------------------------------ checking what was written
+
+
+#: Where MD's file-writing calls live. Every ``Export*`` member of these is checked for
+#: the length of one script -- see `_checking_writes`. ``ExportPatternJSON`` is on
+#: pattern_api, not export_api.
+WRITE_MODULES = ("export_api", "pattern_api")
+
+#: ``Export*`` names that take no path and write nothing: this one returns a short
+#: listing of the scene's fabrics and trims as a string (measured on 2026.0.315).
+NOT_WRITES = frozenset({"ExportObjectBrowserMaterialsList"})
+
+#: How many write records one reply carries. A script exporting in a loop -- one export
+#: per arrangement point, say -- would otherwise put hundreds in every reply. Records
+#: with a problem are kept ahead of clean ones.
+MAX_WRITE_RECORDS = 20
+
+
+def _looks_like_path(value):
+    return (
+        isinstance(value, str)
+        and 0 < len(value) < 1024
+        and "\n" not in value
+        and ("/" in value or "\\" in value)
+        and not value.lstrip().startswith(("{", "["))
+    )
+
+
+def _paths_in(value, found, depth=0):
+    """Every path-shaped string in a return value, however MD nested it.
+
+    ``ExportSnapshot3D`` answers ``[['C:/.../shot.png']]`` and ``ExportOBJ`` a flat list,
+    so nesting is followed rather than assumed.
+    """
+    if depth > 4:
+        return found
+    if isinstance(value, str):
+        if _looks_like_path(value):
+            found.append(value)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            _paths_in(item, found, depth + 1)
+    return found
+
+
+def _distinct(paths):
+    seen = set()
+    kept = []
+    for path in paths:
+        key = os.path.normcase(os.path.normpath(path))
+        if key not in seen:
+            seen.add(key)
+            kept.append(path)
+    return kept
+
+
+def _write_checked(qualified, original, records):
+    """``original``, plus a record of whether the files it reported are really there.
+
+    Measured on 2026.0.315 (2026-10-11): ``ExportOBJ`` into a folder that did not exist
+    returned its path list exactly as a successful export does, and wrote nothing. So
+    the return value of a writing call is not evidence, and the check is made where the
+    files are -- inside MD, straight after the call, against MD's own idea of a relative
+    path.
+
+    A missing parent folder of an absolute file path is created before the call, and
+    the record says so: that is the case MD reports as success and silently drops.
+    Arguments and the return value pass through untouched, and an exception from the
+    call is re-raised as it was.
+    """
+
+    @functools.wraps(original)
+    def checked(*args, **kwargs):
+        target = next((arg for arg in args if isinstance(arg, str)), None)
+        names_a_file = bool(target) and bool(os.path.splitext(target)[1])
+        record = {"call": qualified}
+        if target is not None:
+            record["target"] = target
+        if names_a_file and os.path.isabs(target):
+            parent = os.path.dirname(target)
+            if parent and not os.path.isdir(parent):
+                try:
+                    os.makedirs(parent)
+                    record["created_folders"] = [parent]
+                except OSError as exc:
+                    record["folder_error"] = "{}: {}".format(type(exc).__name__, exc)
+        try:
+            value = original(*args, **kwargs)
+        except BaseException as exc:
+            if "created_folders" in record or "folder_error" in record:
+                record["raised"] = "{}: {}".format(type(exc).__name__, exc)
+                records.append(record)
+            raise
+        expected = _distinct(_paths_in(value, []) + ([target] if names_a_file else []))
+        if not expected:
+            if _looks_like_path(target):
+                record["unverified"] = (
+                    "it named no file and returned no path, so there was nothing to check"
+                )
+                records.append(record)
+            return value
+        missing = [path for path in expected if not os.path.exists(path)]
+        record["written"] = [path for path in expected if path not in missing]
+        if missing:
+            record["missing_outputs"] = missing
+        empty = [
+            path for path in record["written"]
+            if os.path.isfile(path) and os.path.getsize(path) == 0
+        ]
+        if empty:
+            record["empty_outputs"] = empty
+        records.append(record)
+        return value
+
+    return checked
+
+
+def _checking_writes(records):
+    """Check every ``Export*`` call for the length of one script. Returns the undo list.
+
+    The module attribute is replaced rather than the script's namespace, because a
+    script that says ``import export_api`` rebinds the name to the module itself, and
+    the module is what md_call's generated source calls too. Never raises: a call that
+    cannot be wrapped is left as it is, unchecked.
+    """
+    installed = []
+    for module_name in WRITE_MODULES:
+        try:
+            module = __import__(module_name)
+        except ImportError:
+            continue
+        for name in dir(module):
+            if not name.startswith("Export") or name in NOT_WRITES:
+                continue
+            try:
+                original = getattr(module, name)
+                if not callable(original) or isinstance(original, type):
+                    continue
+                wrapper = _write_checked(module_name + "." + name, original, records)
+                setattr(module, name, wrapper)
+            except Exception:
+                continue
+            installed.append((module, name, original, wrapper))
+    return installed
+
+
+def _stop_checking_writes(installed):
+    """Put back every call `_checking_writes` replaced -- unless the script replaced it."""
+    for module, name, original, wrapper in reversed(installed):
+        with contextlib.suppress(Exception):
+            if getattr(module, name, None) is wrapper:
+                setattr(module, name, original)
+
+
+#: Keys that make a write record worth reading before the clean ones.
+_WRITE_PROBLEMS = frozenset(
+    {"missing_outputs", "empty_outputs", "created_folders", "folder_error", "raised",
+     "unverified"}
+)
+
+
+def _write_report(records):
+    problems = [record for record in records if _WRITE_PROBLEMS & set(record)]
+    clean = [record for record in records if not _WRITE_PROBLEMS & set(record)]
+    report = {"writes": (problems + clean)[:MAX_WRITE_RECORDS]}
+    if len(records) > MAX_WRITE_RECORDS:
+        report["writes_omitted"] = len(records) - MAX_WRITE_RECORDS
+    return report
+
+
 def _run(source, name):
     """Execute a script in a namespace of its own, capturing everything it printed.
 
     ``sys.stdout`` is redirected rather than ``print`` rebound, so that output from
     anything the script *calls* is captured too. That is safe here only because this
-    runs on MD's main thread with the pump stopped: nothing else in the process can
-    write to the stream while it is swapped out.
+    runs inside the timer's tick on MD's main thread, and a tick never runs inside
+    another: nothing else in the process can write to the stream while it is swapped
+    out.
+
+    MD's ``Export*`` calls are checked while it runs: see `_checking_writes`.
     """
     captured = io.StringIO()
     namespace = _script_namespace(name)
-    with contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):
-        exec(compile(source, name or "<md-mcp>", "exec"), namespace)
-    return captured.getvalue()
-
-
-def _collapse_unchanged(scene, state):
-    """Replace the piece list with a marker when it has not moved since last time.
-
-    Every ``run`` reply carries the scene so that what MD ended up with is checked
-    rather than assumed, and that stays true: ``pattern_count`` and
-    ``seam_group_count`` -- the numbers worth checking -- are scalars and always go.
-    What does not need repeating is the list of names behind them. Measured on a
-    58-piece garment: a run whose output was two characters returned 2,770, of which
-    2,500 were a piece list identical to the one in the reply before it.
-
-    So the list goes in full the first time and every time it differs, and a caller
-    that never sees it change never sees it again. A changed list is never suppressed,
-    which is the property that matters: silence here means "the same as the one you
-    already have", never "nothing worth mentioning".
-    """
-    pieces = scene.get("pieces")
-    if not isinstance(pieces, list):
-        return scene
-    key = json.dumps(pieces, sort_keys=True, default=repr)
-    if key == state.get("last_pieces"):
-        scene["pieces"] = "unchanged: same {} pieces as the previous reply".format(
-            len(pieces)
+    started = time.monotonic()
+    result = {"ok": True, "execution_succeeded": True}
+    writes = []
+    installed = _checking_writes(writes)
+    try:
+        with contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):
+            exec(compile(source, name or "<md-mcp>", "exec"), namespace)
+    except (Exception, SystemExit) as exc:
+        # Earlier statements are not rolled back. Preserve their output and let the
+        # caller inspect the resulting scene even when a later statement fails.
+        result.update(
+            ok=False, execution_succeeded=False, error=str(exc),
+            traceback=traceback.format_exc(),
+            plugin_version=__version__, plugin_build=BUILD,
         )
-        scene["pieces_unchanged"] = True
-    else:
-        state["last_pieces"] = key
-    return scene
+    finally:
+        _stop_checking_writes(installed)
+    result["output"] = captured.getvalue()
+    result["elapsed_seconds"] = time.monotonic() - started
+    result.update(_write_report(writes))
+    return result
 
 
 def _handle(request, state):
@@ -311,48 +423,22 @@ def _handle(request, state):
         source = request.get("source")
         if not source:
             return {"ok": False, "error": "run needs a 'source' of Python to execute"}
-        output = _run(source, request.get("name"))
-        return dict(ok=True, output=output, **_collapse_unchanged(_scene(), state))
+        result = _run(source, request.get("name"))
+        # Always return a self-contained scene. Queries and other clients also use
+        # run, so a listener-global cache cannot know what this caller has seen.
+        result.update(_scene())
+        return result
     if op == "shutdown":
         state["stop"] = True
         return {"ok": True, "stopped": True}
     return {"ok": False, "error": "unknown op {!r}".format(op)}
 
 
-def _read_request(connection, pump):
-    """Read one line from a connected peer, pumping MD while we wait for it."""
-    deadline = time.time() + REQUEST_TIMEOUT
-    first_byte_deadline = time.time() + SILENT_PEER_TIMEOUT
-    buffer = b""
-    connection.setblocking(False)
-    while b"\n" not in buffer:
-        now = time.time()
-        # Two deadlines: one for a peer that is talking and slow, a much shorter one for
-        # a peer that has not said a word. Only the second one can be triggered by
-        # somebody who is not a client at all.
-        if now > deadline or (not buffer and now > first_byte_deadline):
-            return None
-        try:
-            chunk = connection.recv(65536)
-        except BlockingIOError:
-            pump()
-            time.sleep(POLL_INTERVAL)
-            continue
-        except OSError:
-            return None
-        if not chunk:
-            return None
-        buffer += chunk
-    connection.setblocking(True)
-    return buffer.split(b"\n", 1)[0]
+# ---------------------------------------------------------------- serving, a tick at a time
 
 
-def _serve_connection(connection, state, pump):
-    raw = _read_request(connection, pump)
-    if raw is None:
-        # Never sent a request, or went away mid-way. Nothing to reply to.
-        return
-
+def _reply_to(connection, raw, state):
+    """Answer one request line on ``connection``. Never raises."""
     # Deliberately inside the catch: an exception raised by the *script* -- an export to
     # a locked path is the everyday one -- is an answer the caller needs, not a dead
     # connection. Swallowed, it reads as "the listener stopped", and MD gets restarted
@@ -378,25 +464,207 @@ def _serve_connection(connection, state, pump):
             "plugin_build": BUILD,
         }
     with contextlib.suppress(OSError):
+        # Blocking for the send, with a limit: a peer that stops reading could
+        # otherwise hold MD's main thread for as long as it liked.
+        connection.settimeout(REQUEST_TIMEOUT)
         connection.sendall((json.dumps(reply) + "\n").encode("utf-8"))
 
 
-# ----------------------------------------------------------------------------- the loop
+def _accept_waiting(state):
+    """Take every connection waiting on the port, without waiting for any."""
+    while True:
+        listener = state["listener"]
+        if listener is None:
+            return
+        try:
+            connection, _ = listener.accept()
+        except (BlockingIOError, InterruptedError, socket.timeout):
+            return
+        except OSError:
+            # Windows raises WSAECONNRESET from accept() when a peer aborts during the
+            # handshake -- a port scanner does it. Treating that as shutdown would unbind
+            # the port for the rest of the MD session.
+            if listener.fileno() == -1:
+                state["stop"] = True
+            return
+        connection.setblocking(False)
+        state["peers"].append(
+            {"socket": connection, "buffer": b"", "opened": time.monotonic()}
+        )
+
+
+def _poll_peer(peer, now):
+    """One look at a peer: its request line, None to wait for more, or False to drop it."""
+    try:
+        chunk = peer["socket"].recv(65536)
+    except (BlockingIOError, InterruptedError):
+        chunk = None
+    except OSError:
+        return False
+    if chunk == b"":
+        # Went away before finishing a request. Nothing to reply to.
+        return False
+    if chunk:
+        peer["buffer"] += chunk
+    if b"\n" in peer["buffer"]:
+        return peer["buffer"].split(b"\n", 1)[0]
+    waited = now - peer["opened"]
+    # Two deadlines: one for a peer that is talking and slow, a much shorter one for a
+    # peer that has not said a word. Only the second one can be triggered by somebody
+    # who is not a client at all.
+    if waited > REQUEST_TIMEOUT or (not peer["buffer"] and waited > SILENT_PEER_TIMEOUT):
+        return False
+    return None
+
+
+def _serve_peers(state):
+    """Answer every peer whose request is complete, oldest first, one at a time."""
+    for peer in list(state["peers"]):
+        outcome = _poll_peer(peer, time.monotonic())
+        if outcome is None:
+            continue
+        state["peers"].remove(peer)
+        try:
+            if outcome is not False:
+                # Counted before the reply goes out, so a client that reads the count
+                # straight after its answer sees its own request in it.
+                state["requests"] += 1
+                _reply_to(peer["socket"], outcome, state)
+        finally:
+            with contextlib.suppress(OSError):
+                peer["socket"].close()
+        if state["stop"]:
+            return
+
+
+def _tick(state):
+    """What the timer calls, on MD's main thread: accept, read, answer, give it back.
+
+    Never raises: this is called from a Windows callback, where an exception has
+    nowhere useful to go. What went wrong is kept in ``state["last_error"]``.
+
+    **Does nothing when it is already running.** An MD call made while a request is
+    being served can pump MD's message queue -- a modal dialog does -- and the timer
+    fires inside it. Serving there would run a second request in the middle of the
+    first, and MD is not re-entrant, so the inner tick returns at once and the request
+    waits for the outer one to finish. One request at a time executes inside MD, by
+    this flag rather than by luck.
+    """
+    if state["busy"] or state["stopped"]:
+        return
+    state["busy"] = True
+    try:
+        state["ticks"] += 1
+        _accept_waiting(state)
+        _serve_peers(state)
+    except Exception as exc:
+        state["last_error"] = "{}: {}".format(type(exc).__name__, exc)
+    finally:
+        state["busy"] = False
+    if state["stop"]:
+        _halt(state, "a shutdown request")
+
+
+# ------------------------------------------------------------------------- the timers
+
+
+def _keep_alive(callback):
+    table = getattr(builtins, _KEEP_ALIVE, None)
+    if table is None:
+        table = []
+        setattr(builtins, _KEEP_ALIVE, table)
+    table.append(callback)
+
+
+class _WindowsTimer:
+    """A user32 thread timer: Windows calls ``callback`` from MD's own message loop.
+
+    Measured on 2026.0.315 (2026-10-11): armed from a Python Editor Run that then
+    returned, a 25 ms timer fired on MD's main thread for as long as MD ran -- every
+    31 ms or so, since Windows rounds up to its clock tick -- MD's API answered inside
+    it, MD stayed responsive, and closing MD ended the process.
+
+    No window: a timer with no window is delivered to the thread that set it, and that
+    is MD's main thread, the one every Plugin tab click and Python Editor Run uses.
+    """
+
+    def __init__(self, interval_ms, callback):
+        from ctypes import wintypes
+
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        # The id and the callback are pointer-sized. Left to ctypes' int-sized defaults
+        # a 64-bit value is truncated, and Windows calls whatever the truncation names.
+        proc_type = ctypes.WINFUNCTYPE(
+            None, wintypes.HWND, wintypes.UINT, ctypes.c_size_t, wintypes.DWORD
+        )
+        user32.SetTimer.argtypes = [
+            wintypes.HWND, ctypes.c_size_t, wintypes.UINT, proc_type
+        ]
+        user32.SetTimer.restype = ctypes.c_size_t
+        user32.KillTimer.argtypes = [wintypes.HWND, ctypes.c_size_t]
+        user32.KillTimer.restype = wintypes.BOOL
+        self._user32 = user32
+
+        def fire(hwnd, message, event, when):
+            # Nothing may escape into ctypes: it would print to a console nobody sees
+            # and carry on, which hides the failure without containing it.
+            try:
+                callback()
+            except BaseException:
+                pass
+
+        self._proc = proc_type(fire)
+        _keep_alive(self._proc)
+        self._id = user32.SetTimer(None, 0, interval_ms, self._proc)
+        if not self._id:
+            raise OSError("SetTimer failed ({})".format(ctypes.get_last_error()))
+
+    def cancel(self):
+        if self._id:
+            self._user32.KillTimer(None, self._id)
+            self._id = 0
+
+
+class _ThreadTimer:
+    """Calls ``callback`` every interval from a thread of its own. For the tests only.
+
+    Inside MD this would be the lie the module docstring describes: MD freezes every
+    Python thread the moment a script returns, so the port would bind and nothing
+    would answer. The tests run on a real CPython that schedules threads -- and a
+    Windows timer fires only for a thread that pumps messages, which a test runner
+    does not -- so here a thread is the faithful stand-in.
+    """
+
+    def __init__(self, interval_ms, callback):
+        self._stopped = threading.Event()
+
+        def run():
+            while not self._stopped.wait(interval_ms / 1000.0):
+                callback()
+
+        self._thread = threading.Thread(target=run, name="md-mcp-timer", daemon=True)
+        self._thread.start()
+
+    def cancel(self):
+        self._stopped.set()
+
+
+# -------------------------------------------------------------------------- lifecycle
 
 
 def _bind(port):
     """Bind the port this session answers on. Raises if it cannot."""
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     if os.name != "nt":
-        # Stop then Start is a button here, and on POSIX the port sits in TIME_WAIT for
-        # a minute or two after the old socket closes -- long enough that the Start
+        # Stop then Start is two clicks here, and on POSIX the port sits in TIME_WAIT
+        # for a minute or two after the old socket closes -- long enough that the Start
         # fails with EADDRINUSE and reads as "something else has the port". Not set on
         # Windows on purpose: there SO_REUSEADDR lets a second process steal a port
         # already bound, and Windows lets the rebind happen without it anyway.
         listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
         listener.bind((HOST, port))
-        listener.listen(4)
+        listener.listen(8)
     except OSError:
         with contextlib.suppress(OSError):
             listener.close()
@@ -405,54 +673,147 @@ def _bind(port):
     return listener
 
 
-def start_serving(state, raising=False):
-    """Open the port. Returns whether it is now serving.
-
-    Swallows the failure by default, because this is what a button calls: an exception
-    from a window callback would take the window and the loop with it, and "something
-    else already has port 5121" is exactly the kind of thing the window exists to show.
-    """
-    if state["serving"]:
-        return True
-    port = state["port"]
+def _port_is_free(port):
     try:
-        _stop_foreign(port)
-        state["listener"] = _bind(port)
-    except (OSError, RuntimeError) as exc:
-        state["last"] = "could not listen on {}: {}".format(port, exc)
-        print("md-mcp: " + state["last"])
-        if raising:
-            raise
+        socket.create_connection((HOST, port), timeout=0.5).close()
+    except OSError:
+        return True
+    return False
+
+
+def _stop_foreign(port):
+    """Ask whatever holds ``port`` to stand down, and wait for it to let go.
+
+    For a listener this process does not know about: one left by a previous MD, or by an
+    older version of this file still looping in this one. Binding with ``SO_REUSEADDR``
+    instead would succeed on Windows while the old socket is still listening, and
+    connections would land on whichever of the two the stack felt like.
+    """
+    if _port_is_free(port):
         return False
-    state["serving"] = True
-    state["last"] = "listening on {}:{}".format(HOST, port)
+    try:
+        with socket.create_connection((HOST, port), timeout=1.0) as client:
+            client.sendall(b'{"op": "shutdown"}\n')
+            client.recv(4096)
+    except OSError:
+        pass
+    for _ in range(20):
+        if _port_is_free(port):
+            return True
+        time.sleep(0.25)
+    raise RuntimeError(
+        "port {} is still in use and did not answer a shutdown; close whatever holds "
+        "it, or set MD_MCP_PORT on both sides".format(port)
+    )
+
+
+def _halt(state, why):
+    """Stop serving: kill the timer, close the port and every peer. Safe to repeat.
+
+    Returns whether this call is the one that stopped it.
+    """
+    if state["stopped"]:
+        return False
+    state["stopped"] = True
+    state["stop"] = True
+    timer, state["timer"] = state["timer"], None
+    if timer is not None:
+        with contextlib.suppress(Exception):
+            timer.cancel()
+    listener, state["listener"] = state["listener"], None
+    if listener is not None:
+        with contextlib.suppress(OSError):
+            listener.close()
+    for peer in state["peers"]:
+        with contextlib.suppress(OSError):
+            peer["socket"].close()
+    state["peers"] = []
+    table = _registry()
+    if table.get(state["port"]) is state:
+        del table[state["port"]]
+    print("md-mcp: stopped listening on {}:{} ({}).".format(HOST, state["port"], why))
+    return True
+
+
+def _default_timer():
+    """The timer MD needs: Windows', since nothing else fires on MD's main thread."""
+    if not hasattr(ctypes, "WinDLL"):
+        raise RuntimeError("md-mcp serves from a Windows timer, and this is not Windows")
+    return _WindowsTimer
+
+
+def running(port=None):
+    """The listener serving ``port`` in this process, or None."""
+    state = _registry().get(PORT if port is None else port)
+    if state is None or state.get("stopped", True):
+        return None
+    return state
+
+
+def start(port=None, timer=None):
+    """Open the port, arm the timer that serves it, and return its state. Raises if not.
+
+    Returns at once -- inside MD that is the point: the Run that called this finishes,
+    and the timer serves from MD's message loop until `stop`, a shutdown request, or
+    MD closing.
+
+    Called while a listener is already serving the port, it changes nothing and returns
+    that listener's state: a second click on Start MCP must not drop what the first is
+    serving.
+
+    ``timer`` makes the timer; it defaults to the Windows one MD needs. The tests pass
+    `_ThreadTimer`, for the reason its docstring gives.
+    """
+    port = PORT if port is None else port
+    already = running(port)
+    if already is not None:
+        return already
+    timer = timer or _default_timer()
+
+    _stop_foreign(port)
+    state = {
+        "port": port,
+        "listener": _bind(port),
+        "timer": None,
+        "peers": [],
+        "busy": False,
+        "stop": False,
+        "stopped": False,
+        "requests": 0,
+        "ticks": 0,
+        "last_error": "",
+        "listener_path": _this_file(),
+    }
+    # What md_mcp_stop.py calls. It cannot import this file -- running it is Start --
+    # so the way in is a function left where both runs can see it.
+    state["halt"] = functools.partial(_halt, state)
+    try:
+        state["timer"] = timer(TICK_MS, functools.partial(_tick, state))
+    except BaseException:
+        with contextlib.suppress(OSError):
+            state["listener"].close()
+        raise
+    _registry()[port] = state
     print(
         "md-mcp: listening on {}:{} (MD {}, plugin {})".format(
             HOST, port, _md_version(), __version__
         )
     )
-    return True
+    return state
 
 
-def stop_serving(state):
-    """Close the port and keep the loop -- and the window -- alive."""
-    if not state["serving"]:
-        return
-    state["serving"] = False
-    listener, state["listener"] = state["listener"], None
-    with contextlib.suppress(OSError):
-        listener.close()
-    state["last"] = "stopped listening on {}:{}".format(HOST, state["port"])
-    print("md-mcp: " + state["last"])
+def stop(port=None, why="stopped"):
+    """Stop the listener serving ``port`` in this process. Returns whether one was."""
+    state = running(port)
+    return state is not None and _halt(state, why)
 
 
 def _report(message):
-    """Say something nobody should miss, wherever MD will show it.
+    """Say something to whoever clicked, wherever MD will show it.
 
-    Where a clicked plugin's ``print`` output goes has not been measured, so anything
-    that decides whether the plugin is usable at all goes in a message box too. It is
-    modal, and it holds the thread this loop runs on until it is dismissed -- which is
-    why this is for the window that would not open, and not for anything routine.
+    Where a clicked plugin's ``print`` output goes has not been measured, so the
+    outcome of a click goes in a message box too. It is modal, and that is fine here:
+    the timer is already armed, and a modal box keeps dispatching it.
     """
     print("md-mcp: " + message)
     box = getattr(
@@ -463,475 +824,7 @@ def _report(message):
             box("md-mcp: " + message)
 
 
-def _tick_panel(state, panel_factory):
-    """Open, raise, refresh or forget the control window. Never raises."""
-    if panel_factory is not None and state["show_panel"] and state["panel"] is None:
-        state["show_panel"] = False
-        state["panel"] = panel_factory(state)
-
-    panel = state["panel"]
-    if panel is None:
-        return
-    if state["show_panel"]:
-        state["show_panel"] = False
-        with contextlib.suppress(Exception):
-            panel.raise_window()
-    try:
-        alive = panel.tick()
-    except Exception as exc:
-        # A window that broke must not take the bridge with it: the socket is the
-        # part something else is depending on.
-        state["last"] = "the control window stopped ({}: {})".format(
-            type(exc).__name__, exc
-        )
-        print("md-mcp: " + state["last"])
-        alive = False
-    if not alive:
-        state["panel"] = None
-
-
-def _accept_one(state, pump):
-    """Serve one waiting connection, if there is one. Returns whether there was."""
-    try:
-        connection, _ = state["listener"].accept()
-    except (BlockingIOError, socket.timeout):
-        return False
-    except OSError:
-        # Windows raises WSAECONNRESET from accept() when a peer aborts during the
-        # handshake -- a port scanner does it. Treating that as shutdown would unbind
-        # the port for the rest of the MD session.
-        listener = state["listener"]
-        if listener is None or listener.fileno() == -1:
-            stop_serving(state)
-        return False
-    try:
-        _serve_connection(connection, state, pump)
-        state["requests"] += 1
-    finally:
-        with contextlib.suppress(OSError):
-            connection.close()
-    return True
-
-
-def _loop(state, pump, panel_factory=None):
-    """The loop that owns MD's main thread: the window, the socket, and MD's queue.
-
-    One loop for all three on purpose. MD runs Python only while a script is running,
-    so everything this plugin does has to happen inside one script that does not
-    return -- a window with a ``mainloop()`` of its own would hold the thread and the
-    bridge would answer nothing for as long as it was open.
-    """
-    while not state["stop"]:
-        if not pump():
-            # MD is quitting. Let go of the main thread so it can.
-            break
-        _tick_panel(state, panel_factory)
-        if state["panel_error"] and not state["panel_reported"]:
-            # Said once, and only once: this runs a few hundred times a second.
-            state["panel_reported"] = True
-            if state["serving"]:
-                _report(state["panel_error"])
-            else:
-                # Waiting for a Start nobody can press would make this plugin do
-                # nothing whatever. The bridge opens itself instead -- announced,
-                # because it is not what the click asked for.
-                _report(
-                    state["panel_error"] + " Listening straight away instead, since "
-                    "there is no Start button to press; run this plugin again to stop."
-                )
-                start_serving(state)
-                continue
-        if state["serving"]:
-            if _accept_one(state, pump):
-                continue
-        elif state["panel"] is None:
-            # Not listening and nothing on screen. There is nothing left for this
-            # script to do, and a script with nothing to do must return: holding MD's
-            # main thread costs MD and buys nobody anything.
-            break
-        time.sleep(POLL_INTERVAL)
-
-
-# -------------------------------------------------------------------- the control window
-
-
-#: Window and control styles, and the messages this panel answers. Plain integers, so
-#: they are safe to define on a machine that has no user32 at all -- the tests run on
-#: Linux, where everything below that touches ctypes.WinDLL is never reached.
-_WS_CAPTION = 0x00C00000
-_WS_SYSMENU = 0x00080000
-_WS_MINIMIZEBOX = 0x00020000
-_WS_CHILD = 0x40000000
-_WS_VISIBLE = 0x10000000
-_SS_LEFT = 0x00000000
-_BS_PUSHBUTTON = 0x00000000
-_CW_USEDEFAULT = -2147483648  # 0x80000000 as the signed int CreateWindowExW takes
-_SW_SHOWNORMAL = 1
-_SW_RESTORE = 9
-_WM_DESTROY = 0x0002
-_WM_CLOSE = 0x0010
-_WM_SETFONT = 0x0030
-_WM_COMMAND = 0x0111
-_DEFAULT_GUI_FONT = 17
-_COLOR_BTNFACE = 15
-_SWP_NOMOVE = 0x0002
-_SWP_NOZORDER = 0x0004
-_IDC_ARROW = 32512
-
-#: Ids for the two buttons, as WM_COMMAND reports them in the low word of wParam.
-_IDC_START = 1001
-_IDC_STOP = 1002
-
-#: Counts the windows this process has built, so each gets a window class of its own.
-#: Registering a class name that already exists fails and leaves the *first*
-#: registration's WNDPROC in place -- a pointer into a Python callback that may since
-#: have been collected, which Windows would then call. A fresh name costs nothing.
-_PANEL_SEQUENCE = "__md_mcp_panel_sequence__"
-
-
-class _NativePanel:
-    """A small window built straight on user32: two buttons and a status line.
-
-    No toolkit, on purpose. MD ships `_tkinter.pyd` with `tcl86t.dll` and `tk86t.dll`
-    but none of Tcl's script library, so `Tk()` raises "Can't find a usable init.tcl"
-    (measured on 2026.0.315, 2026-09-19) -- and shipping somebody else's Tcl to fix
-    that is a dependency this plugin has no business carrying. `ctypes` and `user32`
-    are already here for MD's message pump.
-
-    It has no message loop of its own. The serve loop pumps this thread's queue, which
-    is what dispatches clicks into `_handle_message`, and calls `tick` to refresh the
-    labels. A loop or a modal dialog of its own would hold MD's main thread -- the one
-    thread the bridge is served on.
-    """
-
-    def __init__(self, state):
-        from ctypes import wintypes
-
-        self._state = state
-        self._open = False
-        self._headline = None
-        self._detail = None
-
-        self._user32 = ctypes.WinDLL("user32", use_last_error=True)
-        self._gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-
-        # LRESULT and the W/LPARAMs are pointer-sized. Left to ctypes' int-sized
-        # default they are truncated, and a window procedure that returns a truncated
-        # value is a window that misbehaves in ways nothing reports.
-        wndproc = ctypes.WINFUNCTYPE(
-            ctypes.c_ssize_t,
-            wintypes.HWND,
-            wintypes.UINT,
-            wintypes.WPARAM,
-            wintypes.LPARAM,
-        )
-
-        class WNDCLASSW(ctypes.Structure):
-            _fields_ = [
-                ("style", wintypes.UINT),
-                ("lpfnWndProc", wndproc),
-                ("cbClsExtra", ctypes.c_int),
-                ("cbWndExtra", ctypes.c_int),
-                ("hInstance", wintypes.HINSTANCE),
-                ("hIcon", wintypes.HICON),
-                ("hCursor", wintypes.HANDLE),
-                ("hbrBackground", wintypes.HBRUSH),
-                ("lpszMenuName", wintypes.LPCWSTR),
-                ("lpszClassName", wintypes.LPCWSTR),
-            ]
-
-        user32, gdi32 = self._user32, self._gdi32
-        user32.RegisterClassW.argtypes = [ctypes.POINTER(WNDCLASSW)]
-        user32.RegisterClassW.restype = wintypes.ATOM
-        user32.CreateWindowExW.argtypes = [
-            wintypes.DWORD,
-            wintypes.LPCWSTR,
-            wintypes.LPCWSTR,
-            wintypes.DWORD,
-            ctypes.c_int,
-            ctypes.c_int,
-            ctypes.c_int,
-            ctypes.c_int,
-            wintypes.HWND,
-            ctypes.c_void_p,
-            wintypes.HINSTANCE,
-            ctypes.c_void_p,
-        ]
-        user32.CreateWindowExW.restype = wintypes.HWND
-        user32.DefWindowProcW.argtypes = [
-            wintypes.HWND,
-            wintypes.UINT,
-            wintypes.WPARAM,
-            wintypes.LPARAM,
-        ]
-        user32.DefWindowProcW.restype = ctypes.c_ssize_t
-        user32.SendMessageW.argtypes = [
-            wintypes.HWND,
-            wintypes.UINT,
-            wintypes.WPARAM,
-            wintypes.LPARAM,
-        ]
-        user32.SendMessageW.restype = ctypes.c_ssize_t
-        user32.DestroyWindow.argtypes = [wintypes.HWND]
-        user32.SetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPCWSTR]
-        user32.EnableWindow.argtypes = [wintypes.HWND, wintypes.BOOL]
-        user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
-        user32.UpdateWindow.argtypes = [wintypes.HWND]
-        user32.SetForegroundWindow.argtypes = [wintypes.HWND]
-        user32.LoadCursorW.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-        user32.LoadCursorW.restype = wintypes.HANDLE
-        gdi32.GetStockObject.argtypes = [ctypes.c_int]
-        gdi32.GetStockObject.restype = ctypes.c_void_p
-        gdi32.CreateFontW.restype = ctypes.c_void_p
-        gdi32.DeleteObject.argtypes = [ctypes.c_void_p]
-        user32.AdjustWindowRect.argtypes = [
-            ctypes.POINTER(wintypes.RECT),
-            wintypes.DWORD,
-            wintypes.BOOL,
-        ]
-        user32.SetWindowPos.argtypes = [
-            wintypes.HWND,
-            wintypes.HWND,
-            ctypes.c_int,
-            ctypes.c_int,
-            ctypes.c_int,
-            ctypes.c_int,
-            wintypes.UINT,
-        ]
-        kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
-        kernel32.GetModuleHandleW.restype = wintypes.HMODULE
-
-        table = _registry()
-        sequence = table.get(_PANEL_SEQUENCE, 0) + 1
-        table[_PANEL_SEQUENCE] = sequence
-
-        # Both kept on the instance: a ctypes callback is collected like any other
-        # object, and Windows holds this pointer for as long as the class is
-        # registered.
-        self._wndproc = wndproc(self._handle_message)
-        self._class = WNDCLASSW()
-        self._class.style = 0
-        self._class.lpfnWndProc = self._wndproc
-        self._class.hInstance = kernel32.GetModuleHandleW(None)
-        self._class.hCursor = user32.LoadCursorW(None, ctypes.c_void_p(_IDC_ARROW))
-        self._class.hbrBackground = _COLOR_BTNFACE + 1
-        self._class.lpszClassName = "md_mcp_panel_{}".format(sequence)
-
-        if not user32.RegisterClassW(ctypes.byref(self._class)):
-            raise OSError("RegisterClassW failed ({})".format(ctypes.get_last_error()))
-
-        style = _WS_CAPTION | _WS_SYSMENU | _WS_MINIMIZEBOX
-        self._hwnd = user32.CreateWindowExW(
-            0,
-            self._class.lpszClassName,
-            "md-mcp",
-            style,
-            _CW_USEDEFAULT,
-            _CW_USEDEFAULT,
-            10,
-            10,
-            None,
-            None,
-            self._class.hInstance,
-            None,
-        )
-        if not self._hwnd:
-            raise OSError("CreateWindowExW failed ({})".format(ctypes.get_last_error()))
-        self._open = True
-
-        # Everything below is in 96-dpi units and scaled here. Laid out in raw pixels
-        # it comes out too small for its own text on any display that is not at 100%,
-        # and what it loses first is the right-hand end of the path -- the one line
-        # that says *which* install is answering.
-        scale = self._dpi_scale(user32, wintypes)
-
-        def at(value):
-            return int(round(value * scale))
-
-        # The frame is not part of the client area, so the window has to be told the
-        # size that *contains* the layout rather than the size of the layout.
-        wanted = wintypes.RECT(0, 0, at(380), at(152))
-        user32.AdjustWindowRect(ctypes.byref(wanted), style, False)
-        user32.SetWindowPos(
-            self._hwnd,
-            None,
-            0,
-            0,
-            wanted.right - wanted.left,
-            wanted.bottom - wanted.top,
-            _SWP_NOMOVE | _SWP_NOZORDER,
-        )
-
-        # The stock GUI font is a fixed 8pt that ignores the display entirely.
-        self._font = gdi32.CreateFontW(
-            -int(round(9 * scale * 96 / 72.0)), 0, 0, 0, 400,
-            0, 0, 0, 0, 0, 0, 0, 0, "Segoe UI",
-        )
-        self._bold = gdi32.CreateFontW(
-            -int(round(9 * scale * 96 / 72.0)), 0, 0, 0, 700,
-            0, 0, 0, 0, 0, 0, 0, 0, "Segoe UI",
-        )
-
-        self._headline_label = self._child(
-            "STATIC", at(14), at(12), at(352), at(20), _SS_LEFT, font=self._bold
-        )
-        self._detail_label = self._child(
-            "STATIC", at(14), at(36), at(352), at(56), _SS_LEFT
-        )
-        self._start_button = self._child(
-            "BUTTON", at(14), at(104), at(108), at(30), _BS_PUSHBUTTON, _IDC_START,
-            "Start",
-        )
-        self._stop_button = self._child(
-            "BUTTON", at(132), at(104), at(108), at(30), _BS_PUSHBUTTON, _IDC_STOP,
-            "Stop",
-        )
-
-        user32.ShowWindow(self._hwnd, _SW_SHOWNORMAL)
-        user32.UpdateWindow(self._hwnd)
-
-    def _dpi_scale(self, user32, wintypes):
-        """How much bigger than 96 dpi this window's display is.
-
-        GetDpiForWindow is Windows 10 1607 and later; older Windows, and a process
-        that is not dpi-aware, both answer 96 one way or another, which is the right
-        answer for them -- Windows stretches the result instead.
-        """
-        try:
-            user32.GetDpiForWindow.argtypes = [wintypes.HWND]
-            user32.GetDpiForWindow.restype = wintypes.UINT
-            dpi = user32.GetDpiForWindow(self._hwnd)
-        except (AttributeError, OSError):
-            return 1.0
-        return (dpi or 96) / 96.0
-
-    def _child(self, kind, x, y, width, height, style, control_id=0, text="", font=None):
-        handle = self._user32.CreateWindowExW(
-            0,
-            kind,
-            text,
-            _WS_CHILD | _WS_VISIBLE | style,
-            x,
-            y,
-            width,
-            height,
-            self._hwnd,
-            ctypes.c_void_p(control_id),
-            self._class.hInstance,
-            None,
-        )
-        if not handle:
-            raise OSError(
-                "CreateWindowExW({}) failed ({})".format(kind, ctypes.get_last_error())
-            )
-        # Without this, every control comes up in the 1990s bitmap system font.
-        self._user32.SendMessageW(handle, _WM_SETFONT, font or self._font, 1)
-        return handle
-
-    def _handle_message(self, hwnd, message, wparam, lparam):
-        """The window procedure: runs inside the serve loop's pump, on MD's main thread.
-
-        So a click changes the state directly -- there is nothing else running to race
-        with, and by the time this returns the loop is already looking at the result.
-        """
-        if message == _WM_COMMAND:
-            control = wparam & 0xFFFF
-            if control == _IDC_START:
-                start_serving(self._state)
-                return 0
-            if control == _IDC_STOP:
-                stop_serving(self._state)
-                return 0
-        elif message == _WM_CLOSE:
-            # Closing the window does not stop the bridge -- this is a control panel,
-            # not a leash. Clicking md-mcp in the Plugin tab puts it back.
-            self._user32.DestroyWindow(hwnd)
-            return 0
-        elif message == _WM_DESTROY:
-            self._open = False
-            return 0
-        return self._user32.DefWindowProcW(hwnd, message, wparam, lparam)
-
-    def tick(self):
-        if not self._open:
-            return False
-        state = self._state
-        headline = (
-            "Listening on {}:{}".format(HOST, state["port"])
-            if state["serving"]
-            else "Not listening"
-        )
-        detail = "md-mcp {} - {} request(s)\n{}\n{}".format(
-            __version__,
-            state["requests"],
-            state["last"] or "idle",
-            _short_path(state["listener_path"]),
-        )
-        # Only when it changes: SetWindowTextW repaints, and this is called every few
-        # milliseconds for the whole MD session.
-        if headline != self._headline:
-            self._headline = headline
-            self._user32.SetWindowTextW(self._headline_label, headline)
-        if detail != self._detail:
-            self._detail = detail
-            self._user32.SetWindowTextW(self._detail_label, detail)
-        self._user32.EnableWindow(self._start_button, not state["serving"])
-        self._user32.EnableWindow(self._stop_button, bool(state["serving"]))
-        return True
-
-    def raise_window(self):
-        self._user32.ShowWindow(self._hwnd, _SW_RESTORE)
-        self._user32.SetForegroundWindow(self._hwnd)
-
-    def close(self):
-        if self._open:
-            self._open = False
-            with contextlib.suppress(Exception):
-                self._user32.DestroyWindow(self._hwnd)
-        for font in ("_font", "_bold"):
-            handle = getattr(self, font, None)
-            if handle:
-                setattr(self, font, None)
-                with contextlib.suppress(Exception):
-                    self._gdi32.DeleteObject(handle)
-
-
-def _short_path(path):
-    """The last two parts of a path, which is what identifies an install.
-
-    The window is 380 units wide and a real install path is not. The whole path is in
-    every `ping` for anyone who needs it; here it only has to answer "which one".
-    """
-    if not path:
-        return ""
-    parts = path.replace("/", "\\").split("\\")
-    return path if len(parts) <= 2 else "...\\" + "\\".join(parts[-2:])
-
-
-def _panel(state):
-    """Build the control window, or record why there is none. Never raises.
-
-    A missing window is a worse plugin, not a broken one: the bridge is the half
-    something else depends on, so a window that will not open is reported and stepped
-    over.
-    """
-    if not hasattr(ctypes, "WinDLL"):
-        state["panel_error"] = (
-            "no control window -- this is not Windows. The bridge is running anyway."
-        )
-        return None
-    try:
-        return _NativePanel(state)
-    except Exception as exc:
-        state["panel_error"] = (
-            "no control window ({}: {}). The bridge is running anyway; run this "
-            "plugin again to stop it.".format(type(exc).__name__, exc)
-        )
-        return None
-
-
-# --------------------------------------------------------------- the Plugin tab entry
+# --------------------------------------------------------------- the Plugin tab entries
 
 
 def _this_file():
@@ -951,7 +844,7 @@ def _state_dir():
 
 
 def _marker_path():
-    """Where we record that MD has been told about this file.
+    """Where we record that MD has been told about each entry.
 
     Nothing here reads MD's plugin list -- `RegisterPythonScript` answers a bool and
     there is no reader for the list itself -- so "is it already registered?" is not a
@@ -983,29 +876,36 @@ def _write_marker(marker, done):
     return None
 
 
-#: What MD shows in the Plugin tab. **One** entry, pointing at this file: clicking it
-#: opens the control window, and the window is where Start and Stop live. MD's Plug-in
-#: Manager adds one `.py` at a time and MD has no call that removes one, so every entry
-#: a plugin owns is a thing somebody has to add and can never take back.
-PLUGIN_NAME = "md-mcp"
+#: What MD shows in the Plugin tab: one entry that starts the bridge, one that stops it.
+#: Exactly two, because MD's Plug-in Manager adds one `.py` at a time and MD has no call
+#: that removes one: every entry a plugin owns is a thing somebody may have to add by
+#: hand, and can only take back in Plug-in Manager.
+START_ENTRY = "Start MCP"
+STOP_ENTRY = "Stop MCP"
+
+#: The file Stop MCP runs. It ships beside this one.
+STOP_SCRIPT = "md_mcp_stop.py"
 
 
-def register_plugin(listener=None, marker=None, name=PLUGIN_NAME):
-    """Put this file in MD's Plugin tab. Returns a line saying what happened.
+def register_plugin(listener=None, marker=None):
+    """Put Start MCP and Stop MCP in MD's Plugin tab. Returns lines saying what happened.
 
-    **Never raises.** This runs on the way to serving, and a bridge with no button is
+    **Never raises.** This runs on the way to serving, and a bridge with no buttons is
     worth more than neither.
 
     Asks once per (path, name) rather than once per session: MD does not say whether it
     already had a script, so asking every time is how the Plugin tab fills up with
     duplicates that nothing can remove. Delete the marker file to ask again.
 
-    Measured on MD 2026.0.315, 2026-09-19. `RegisterPythonScript(name, path)` adds a
-    working entry, without restarting MD -- from a **top-level Run** in the Python
-    Editor. It is declared `-> bool` and it answers **False** for every name and path
-    when called from a script that is itself running inside another one, which is what
-    a run over the bridge is. So the bool is checked and a False is never recorded: an
-    entry written down as registered is one nobody ever offers again.
+    **The path comes first: `RegisterPythonScript(path, title)`.** Measured on MD
+    2026.0.315, 2026-10-11, from MD's own log
+    (``C:\\Users\\Public\\Documents\\MarvelousDesigner\\New Assets\\api_plugin_log.txt``):
+    called as (title, path) it reported "the script path is invalid: <MD's install
+    folder>/Start MCP" -- the title, read as a relative path. Every refusal this file
+    used to blame on running inside another script is explained by that. Called as
+    (path, title) MD read the path, and declined a path it already had ("already
+    registered"). It is declared `-> bool`, so the bool is checked and a False is never
+    recorded: an entry written down as registered is one nobody ever offers again.
     """
     listener = os.path.abspath(listener) if listener else _this_file()
     if listener is None:
@@ -1015,35 +915,55 @@ def register_plugin(listener=None, marker=None, name=PLUGIN_NAME):
             "the README instead of pasting the file's contents."
         )
 
-    marker = marker or _marker_path()
-    done = _read_marker(marker)
-    key = "{} :: {}".format(os.path.normcase(listener), name)
-    if key in done:
-        return "md-mcp: already in MD's Plugin tab as {!r} (delete {} to ask MD " "again)".format(
-            name, marker
+    entries = [(START_ENTRY, listener)]
+    stopper = os.path.join(os.path.dirname(listener), STOP_SCRIPT)
+    lines = []
+    if os.path.isfile(stopper):
+        entries.append((STOP_ENTRY, stopper))
+    else:
+        lines.append(
+            "md-mcp: no {} beside {}, so there is no Stop MCP entry to register; "
+            "reinstall the plugin to get one.".format(STOP_SCRIPT, listener)
         )
 
+    marker = marker or _marker_path()
+    done = _read_marker(marker)
     # The wide form for the path: Windows user directories routinely contain non-ASCII
-    # characters, and this one is under the user's own profile.
+    # characters, and an install is under the user's own profile.
     register = getattr(
         utility_api, "RegisterPythonScriptW", utility_api.RegisterPythonScript
     )
-    accepted, why = _ask_md(register, name, listener)
-    if not accepted:
-        return (
-            "md-mcp: MD would not register {}. It answers False for every name and "
-            "path when the call comes from a script running inside another one "
-            "(measured on 2026.0.315) -- so run the two-line bootstrap from the Python "
-            "Editor with nothing else going. Failing that, add it by hand: Plugin tab "
-            "> Plug-in Manager > + ADD > {}".format(why, listener)
-        )
+    added = []
+    for name, path in entries:
+        key = "{} :: {}".format(os.path.normcase(path), name)
+        if key in done:
+            continue
+        accepted, why = _ask_md(register, name, path)
+        if not accepted:
+            lines.append(
+                "md-mcp: MD would not register {}. MD gives the reason in its plugin "
+                "log -- C:\\Users\\Public\\Documents\\MarvelousDesigner\\New Assets\\"
+                "api_plugin_log.txt -- and declines a script it already has, whatever "
+                "the entry is called. To add it by hand: Plugin tab > Plug-in Manager > "
+                "+ ADD > {}".format(why, path)
+            )
+            continue
+        done[key] = {"name": name, "path": path, "plugin_version": __version__}
+        added.append(name)
 
-    done[key] = {"name": name, "path": listener, "plugin_version": __version__}
-    complaint = _write_marker(marker, done)
-    added = "md-mcp: added to MD's Plugin tab as {!r}. Click it there to open the " "control window.".format(
-        name
-    )
-    return added + ("\n" + complaint if complaint else "")
+    if added:
+        complaint = _write_marker(marker, done)
+        lines.insert(0, "md-mcp: added {} to MD's Plugin tab.".format(
+            " and ".join(repr(name) for name in added)))
+        if complaint:
+            lines.append(complaint)
+    elif not lines:
+        lines.append(
+            "md-mcp: {} already in MD's Plugin tab (delete {} to ask MD again)".format(
+                " and ".join(repr(name) for name, _ in entries), marker
+            )
+        )
+    return "\n".join(lines)
 
 
 def _ask_md(call, name, path):
@@ -1053,7 +973,8 @@ def _ask_md(call, name, path):
     if it raised, what it raised.
     """
     try:
-        accepted = call(name, path)
+        # Path first, title second -- see register_plugin.
+        accepted = call(path, name)
     except Exception as exc:
         return False, "{} ({}: {})".format(name, type(exc).__name__, exc)
     if accepted is False:
@@ -1061,145 +982,34 @@ def _ask_md(call, name, path):
     return True, ""
 
 
-# -------------------------------------------------------------------------- lifecycle
-
-
-def _port_is_free(port):
-    try:
-        socket.create_connection((HOST, port), timeout=0.5).close()
-    except OSError:
-        return True
-    return False
-
-
-def _stop_foreign(port):
-    """Ask whatever holds ``port`` to stand down, and wait for it to let go.
-
-    This is for a listener left by a *previous* MD process. One left by this process
-    cannot be reached this way -- see `start`. Binding with ``SO_REUSEADDR`` instead
-    would succeed on Windows while the old socket is still listening, and connections
-    would land on whichever of the two the stack felt like.
-    """
-    if _port_is_free(port):
-        return False
-    try:
-        with socket.create_connection((HOST, port), timeout=1.0) as client:
-            client.sendall(b'{"op": "shutdown"}\n')
-            client.recv(4096)
-    except OSError:
-        pass
-    for _ in range(20):
-        if _port_is_free(port):
-            return True
-        time.sleep(0.25)
-    raise RuntimeError(
-        "port {} is still in use and did not answer a shutdown; close whatever holds "
-        "it, or set MD_MCP_PORT on both sides".format(port)
-    )
-
-
-def start(port=None, block=True, serving=None, panel_factory=None):
-    """Hold MD's main thread: show the window, and serve the bridge when told to.
-
-    Returns when the bridge has been stopped and the window closed -- inside MD, that
-    is the whole session.
-
-    ``serving`` decides whether the port is open before anyone has pressed anything.
-    It defaults to **whether there is no window**: with a window, opening the plugin
-    opens the window and nothing else, and Start is what opens the port; without one,
-    there would be nothing to press, so the bridge opens itself as it always did.
-
-    ``panel_factory`` builds the control window from the loop's state; ``None`` means
-    no window at all, which is what the tests use and what MD gets when the window
-    cannot be built.
-
-    Run a second time in the same MD, this does **not** replace the listener. The
-    second run executes nested inside the first one's loop, so the first cannot answer
-    a shutdown or release its port until the second returns; all a second run can do is
-    leave a flag. With a window that flag is "show yourself"; without one it is "stop",
-    and it says which.
-
-    ``block=False`` serves on a background thread, which is a lie inside MD -- the
-    thread freezes the moment this returns -- and is only for the tests, which run on a
-    real CPython that schedules threads.
-    """
-    port = PORT if port is None else port
-    table = _registry()
-
-    running = table.get(port)
-    if running is not None and not running["stop"]:
-        if panel_factory is not None and not running.get("panel_error"):
-            running["show_panel"] = True
-            print("md-mcp: already running -- bringing the control window back.")
-            return None
-        running["stop"] = True
-        print(
-            "md-mcp: asked the listener on port {} to stop. It stops when this script "
-            "returns; run it once more to start a fresh one.".format(port)
-        )
-        return None
-
-    if serving is None:
-        serving = panel_factory is None
-    state = {
-        "stop": False,
-        "serving": False,
-        "listener": None,
-        "port": port,
-        "panel": None,
-        "show_panel": panel_factory is not None,
-        "panel_error": "",
-        "panel_reported": False,
-        "requests": 0,
-        "last": "" if serving else "press Start to listen",
-        "listener_path": _this_file(),
-    }
-    table[port] = state
-
-    if serving:
-        # With a window to report into, a port that is taken is something to show and
-        # recover from with a button. Without one it stays what it has always been: a
-        # refusal, loudly, rather than a script that sits there looking started.
-        start_serving(state, raising=panel_factory is None)
-    else:
-        print(
-            "md-mcp {}: control window open on {}. Press Start to listen on "
-            "{}:{}.".format(__version__, _md_version(), HOST, port)
-        )
-
-    pump = _make_pump()
-
-    def run():
-        try:
-            _loop(state, pump, panel_factory)
-        finally:
-            state["stop"] = True
-            if table.get(port) is state:
-                del table[port]
-            stop_serving(state)
-            panel = state["panel"]
-            state["panel"] = None
-            if panel is not None:
-                with contextlib.suppress(Exception):
-                    panel.close()
-
-    if not block:
-        import threading
-
-        thread = threading.Thread(target=run, daemon=True)
-        thread.start()
-        return thread
-
-    run()
-    print("md-mcp: stopped.")
-    return None
-
-
 def main():
-    """What Marvelous Designer runs: register the entry, open the window, serve."""
+    """What Start MCP runs: register both entries once, start serving, and return."""
+    registered = ""
     if os.environ.get("MD_MCP_NO_REGISTER") != "1":
-        print(register_plugin())
-    start(panel_factory=_panel)
+        registered = register_plugin()
+        print(registered)
+    was_running = running() is not None
+    try:
+        state = start()
+    except (OSError, RuntimeError) as exc:
+        _report("could not listen on {}:{}: {}".format(HOST, PORT, exc))
+        return
+    if was_running:
+        message = "already listening on {}:{} ({} request(s) so far).".format(
+            HOST, PORT, state["requests"]
+        )
+    else:
+        message = "listening on {}:{}. Stop MCP in the Plugin tab stops it.".format(
+            HOST, PORT
+        )
+    # A box only when something needs attention -- here, news about the entries. A
+    # routine success is printed and nothing more: a modal box is a click every session,
+    # and a dialog on screen is exactly what md-mcp warns about. md_status confirms the
+    # bridge is up.
+    if registered and "already in MD's Plugin tab" not in registered:
+        _report(message + "\n\n" + registered.replace("md-mcp: ", ""))
+    else:
+        print("md-mcp: " + message)
 
 
 #: Not ``if __name__ == "__main__"``. What MD sets ``__name__`` to for a script run
