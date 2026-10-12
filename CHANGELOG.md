@@ -5,8 +5,8 @@ carry the same version. Measured against MD 2026.0.315.
 
 ## 0.4.0
 
-**Upgrading:** install the new plugin, then click **Stop MCP** and **Start MCP** in MD
-(or restart MD) so it loads the new listener. `md_status` shows which listener answered.
+**Upgrading:** install the new plugin, then click **Start/Stop MCP** twice in MD — stop,
+then start — (or restart MD) so it loads the new listener. `md_status` shows which listener answered.
 
 ### Added
 
@@ -32,9 +32,10 @@ carry the same version. Measured against MD 2026.0.315.
 - **`md_snapshot(pattern=True)`**: a picture of the 2D pattern, every piece whole.
 - **The lines to paste into MD**: when MD is not listening, `md_status` and every other
   tool give the exact two lines that start the plugin from MD's Python Editor.
-- **Start MCP and Stop MCP** in MD's Plugin tab. The listener now runs from a Windows
-  timer on MD's main thread and returns straight away, so MD stays usable and closing MD
-  ends the process. A message box appears only when something needs attention.
+- **Start/Stop MCP** in MD's Plugin tab: one click starts the bridge, the next stops it.
+  The listener now runs from a Windows timer on MD's main thread and returns straight
+  away, so MD stays usable and closing MD ends the process. A message box appears only
+  when something needs attention.
 - **`md_checkpoint` and `md_restore`**: save the garment to a `.zpac` and put it back,
   keeping the open avatar. MD's open project is left alone, and MD still asks to save
   before closing.
@@ -59,6 +60,9 @@ carry the same version. Measured against MD 2026.0.315.
   means the default, 5121.
 - Plugin registration: `RegisterPythonScript` takes the path first. Earlier versions
   passed the title first, and MD refused the entry.
+- **A bridge MD could not stop.** MD refused the separate Stop MCP entry, so only Start
+  appeared. The one entry now toggles, and an entry you added by hand for the listener
+  (named `md_mcp_listener`) stops it too.
 - Camera views, `SetArrangementPosition`, snapshot output and MD's unsaved-changes flag
   are described as measured, where earlier notes were wrong.
 

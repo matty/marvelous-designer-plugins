@@ -321,7 +321,7 @@ def build_server() -> MCPServer:
             "script inside MD. Search before calling: the search gives the exact "
             "spelling and arity, and MD dispatches its overloads on arity. Lengths are "
             "millimetres and there is no undo. MD must be open with the bridge "
-            "started (Plugin tab > Start MCP).\n"
+            "started (Plugin tab > Start/Stop MCP).\n"
             "To build, md_draft_piece drafts a piece from named edges and md_sew sews "
             "two of them by name ('front.side'), saying which ends meet; both check "
             "what MD built. The raw calls stay available for everything else.\n"

@@ -576,7 +576,7 @@ def test_a_failure_names_the_listener_build_that_raised_it(md) -> None:
     message = str(failure.value)
     assert "division by zero" in message
     assert "raised by md-mcp listener" in message
-    assert "Stop MCP and then Start MCP" in message
+    assert "click Start/Stop MCP twice" in message
 
 
 def test_a_run_can_be_given_its_own_deadline(md) -> None:

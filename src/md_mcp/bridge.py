@@ -95,7 +95,7 @@ def paste_lines(script: pathlib.Path) -> str:
     """The two lines that run ``script`` from MD's Python Editor.
 
     Lines and not the file's contents: a pasted body has no ``__file__``, so it could
-    not register Start MCP and Stop MCP, and MD's editor keeps its own buffer, which
+    not register Start/Stop MCP, and MD's editor keeps its own buffer, which
     goes stale. ``compile`` with the real path puts that path in any traceback.
     """
     return (
@@ -110,18 +110,19 @@ def how_to_connect() -> str:
     first_time = (
         "If there is no such entry yet, paste these two lines into Main Menu > Plugins "
         f"> Python Editor and press Run:\n\n{paste_lines(script)}\n\nThat starts the "
-        "bridge and adds Start MCP and Stop MCP to the Plugin tab for next time."
+        "bridge and adds Start/Stop MCP to the Plugin tab for next time."
         if script
         else "If there is no such entry yet, run plugin/md_mcp_listener.py from the "
         "md-mcp repo via Main Menu > Plugins > Python Editor > Run, which starts it and "
-        "adds Start MCP and Stop MCP to the Plugin tab."
+        "adds Start/Stop MCP to the Plugin tab."
     )
     return (
-        f"No Marvelous Designer listener on {HOST}:{port()}. In MD, click 'Start MCP' "
-        "in the Plugin tab (an older install calls it 'md-mcp'); it shows a message box "
-        f"only if something went wrong. {first_time} It serves until Stop MCP is "
-        "clicked or MD closes. If MD shows an older md-mcp window instead, that listener "
-        "predates Start MCP: press Start in it, or update the plugin."
+        f"No Marvelous Designer listener on {HOST}:{port()}. In MD, click 'Start/Stop "
+        "MCP' in the Plugin tab (an entry added by hand is called 'md_mcp_listener', and "
+        "earlier installs 'Start MCP' or 'md-mcp'); it shows a message box only if "
+        f"something went wrong. {first_time} It serves until the entry is clicked again "
+        "or MD closes. If MD shows an older md-mcp window instead, that listener "
+        "predates the Plugin tab entry: press Start in it, or update the plugin."
     )
 
 
@@ -153,7 +154,7 @@ def _died_mid_request(op: str, exc: OSError | None) -> str:
         "Look at MD before retrying. If it is gone, everything unsaved in that scene "
         "went with it -- reopen the project, start the listener again, and treat that "
         "call as the suspect rather than repeating it. If MD is still open, the "
-        "listener was stopped instead: click Start MCP in the Plugin tab."
+        "listener was stopped instead: click Start/Stop MCP in the Plugin tab."
     )
 
 
@@ -285,8 +286,8 @@ def request(
                 f"\n(raised by md-mcp listener "
                 f"{reply.get('plugin_version')} build {stamp}; if that is not the "
                 "build you just installed, the listener running in MD is still the "
-                "old one -- click Stop MCP and then Start MCP in the Plugin tab, which "
-                "loads the file afresh.)"
+                "old one -- click Start/Stop MCP twice in the Plugin tab (stop, then "
+                "start), which loads the file afresh.)"
                 if stamp
                 else ""
             )

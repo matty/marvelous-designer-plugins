@@ -58,8 +58,8 @@ BUILD_PLACEHOLDER = 'BUILD = "source checkout"'
 
 #: Everything that goes in the zip, as {name in the package: file in the repo}. The
 #: listener is stamped on the way through; the rest are copied verbatim. Every ``.py``
-#: is something MD runs -- the listener is Start MCP, md_mcp_stop.py is Stop MCP -- so
-#: every one is checked the same way.
+#: is something MD runs -- the listener is Start/Stop MCP, and md_mcp_stop.py stops it for
+#: an entry kept from an earlier version -- so every one is checked the same way.
 PAYLOAD = {
     "md_mcp_listener.py": "plugin/md_mcp_listener.py",
     "md_mcp_stop.py": "plugin/md_mcp_stop.py",

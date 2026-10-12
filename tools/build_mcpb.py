@@ -225,9 +225,9 @@ def manifest(version: str, tools: list[dict]) -> dict:
             "**Marvelous Designer needs the md-mcp plugin as well.** This bundle "
             "carries it: with MD open, ask Claude for md_status, and it gives you two "
             "lines to paste once into MD's Main Menu > Plugins > Python Editor. After "
-            "that, Start MCP in MD's Plugin tab starts the bridge.\n\n"
+            "that, Start/Stop MCP in MD's Plugin tab starts and stops the bridge.\n\n"
             "run_md_python runs arbitrary Python inside MD, over a loopback port that "
-            "is open only while Start MCP is on. MD's API has no undo."
+            "is open only while the bridge is started. MD's API has no undo."
         ),
         "author": {"name": "matty", "url": "https://github.com/matty"},
         "repository": {"type": "git", "url": REPOSITORY},

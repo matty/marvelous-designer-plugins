@@ -1,16 +1,17 @@
 # The Marvelous Designer side of the bridge
 
-Two files, two entries in MD's Plugin tab:
+One entry in MD's Plugin tab, **Start/Stop MCP**, which runs `md_mcp_listener.py`:
 
-| Entry | Runs | Does |
-|---|---|---|
-| **Start MCP** | `md_mcp_listener.py` | Opens a loopback port, arms a timer that serves it, and returns. A message box appears only if something needs attention. |
-| **Stop MCP** | `md_mcp_stop.py` | Kills the timer and closes the port. MD carries on as it was. |
+| Click | Does |
+|---|---|
+| While stopped | Opens a loopback port, arms a timer that serves it, and returns. A message box appears only if something needs attention. |
+| While listening | Kills the timer and closes the port, and says so in a box. MD carries on as it was. |
 
 There is no window, and nothing holds MD's main thread between requests: closing MD
 ends the bridge with it. MD's plugin format is a `.py` file and nothing else — no
 manifest, no bundle, no entry point — and Plug-in Manager adds them **one at a time**,
-so the plugin owns exactly these two entries.
+so the plugin owns exactly this one entry. `md_mcp_stop.py` ships beside it and still
+stops the bridge, for anyone with a Stop MCP entry from an earlier version.
 
 ## Installing
 
@@ -23,7 +24,7 @@ From a release: unzip and run `install.ps1`.
 ```
 
 It verifies every file against the package's `manifest.json` before copying anything,
-copies both scripts somewhere MD can keep pointing at, and prints — and copies to the
+copies the scripts somewhere MD can keep pointing at, and prints — and copies to the
 clipboard — the two lines to run once inside MD. From a checkout, `plugin/install.ps1`
 does the same thing without the verification, since there is no manifest to verify
 against.
@@ -46,16 +47,17 @@ so it is easy to run a stale copy without noticing — and a pasted body has no
 `__file__`, so it cannot register itself either. It says so rather than registering
 something that would fail when clicked.
 
-That run starts the bridge, **finishes**, and adds **Start MCP** and **Stop MCP** to the
-Plugin tab. Every session after it is one click there.
+That run starts the bridge, **finishes**, and adds **Start/Stop MCP** to the Plugin tab.
+Every session after it is one click there.
 
-**Nothing listens until somebody clicks Start MCP.** `run` executes arbitrary Python
-inside MD, so the port opens because it was asked for, never as a side effect. Clicking
-Start MCP while it is already listening changes nothing and says so. What stops it is
-**Stop MCP**, a `shutdown` over the socket, or MD closing.
+**Nothing listens until somebody clicks Start/Stop MCP.** `run` executes arbitrary
+Python inside MD, so the port opens because it was asked for, never as a side effect.
+What stops it is clicking the entry again, a `shutdown` over the socket, or MD closing.
 
-Upgrading from 0.3.0: an entry you added for its listener now does what Start MCP does;
-remove it in Plug-in Manager if two Starts is one too many.
+Upgrading: an entry you added by hand for the listener (MD names it after the file,
+`md_mcp_listener`) runs the same file, so it starts and stops the bridge too; MD will not
+retitle a path it already has. An old **Start MCP** entry does the same, and an old
+**Stop MCP** entry still stops it.
 
 ## Why it is built the way it is
 
@@ -78,17 +80,20 @@ as it is when Simulate is clicked.
 dialog does — lets the timer fire inside the request that made it. That inner tick
 returns at once, so one request at a time executes inside MD, which is not re-entrant.
 
-**Stop MCP is a second file because it has to be.** It cannot import the listener —
-running that file *is* Start — so the listener leaves its state on `builtins`, the one
-place two runs share, with a function Stop MCP calls.
+**One entry, because MD would not take two.** Registering `md_mcp_stop.py` beside a
+registered listener was refused as "already registered", for a script MD had never had,
+and no Stop entry appeared (MD 2026.0.315, 2026-10-12, in MD's plugin log): the bridge
+could be started and not stopped. So the listener's own entry toggles. Each run is a
+fresh namespace, so the running listener leaves its state on `builtins`, the one place
+two runs share, with a function the next click (or `md_mcp_stop.py`) calls.
 
 ## Registering
 
 `utility_api.RegisterPythonScript(path, title)` adds an entry — **path first**. MD's
 plugin log, `C:\Users\Public\Documents\MarvelousDesigner\New Assets\api_plugin_log.txt`,
 says why any registration failed. MD declines a path it already has, whatever the
-title — so an install whose listener was added by hand keeps that entry as its Start,
-under its old title.
+title — so an install whose listener was added by hand keeps that entry, under its old
+title — and it refused a second script from the listener's folder.
 
 The call is declared `-> bool` and that bool is checked: a `False` is reported and never
 written to `%LOCALAPPDATA%\md-mcp\registered.json`, because an entry recorded as
@@ -99,11 +104,10 @@ when MD exits.
 Asked once per (path, name). Delete that file to ask again, or set
 `MD_MCP_NO_REGISTER=1` to never ask. **Nothing in the API unregisters** — the only
 measured way to take an entry out is Plug-in Manager, and that is why this plugin
-registers two entries and not more.
+registers one entry and not more.
 
-If MD refuses, add them by hand — **Plugin** tab → **Plug-in Manager** → **+ ADD** →
-the installed `md_mcp_listener.py`, named Start MCP, and again for `md_mcp_stop.py`,
-named Stop MCP.
+If MD refuses, add it by hand — **Plugin** tab → **Plug-in Manager** → **+ ADD** → the
+installed `md_mcp_listener.py`.
 
 ## Which listener is answering
 
@@ -112,7 +116,8 @@ loaded from, and `md_status` reports all three. That last one matters: **MD hold
 registered plugin's path for good**, so an install from two versions ago keeps
 answering, exactly as confidently as a current one, and every symptom of it looks like
 md-mcp getting MD wrong. A checkout reports itself as `0.0.0+source`. After installing a
-new build, click **Stop MCP** and then **Start MCP**: Start reads the file afresh.
+new build, click **Start/Stop MCP** twice — stop, then start — which reads the file
+afresh.
 
 ## Building the package
 
@@ -147,7 +152,7 @@ dropped after a second without holding up anybody else.
 | `{"op": "ping"}` | MD's version and process id, and the listener's version and path |
 | `{"op": "scene"}` | the pieces, seam groups, avatars and fabrics, read from MD |
 | `{"op": "run", "source": "..."}` | whatever the script printed, plus the resulting scene |
-| `{"op": "shutdown"}` | stops the listener, as Stop MCP does |
+| `{"op": "shutdown"}` | stops the listener, as a second click on the entry does |
 
 A script that raises comes back as `{"ok": false}` with its traceback, and the listener
 keeps serving — a failed call does not cost you an MD restart.

@@ -19,7 +19,7 @@ Open `md-mcp-<version>.mcpb`, or drag it onto **Settings → Extensions**. It ca
 own Python and a copy of the plugin, so nothing else needs installing. Then open MD and
 ask Claude for `md_status`. Until the plugin is running, it answers with two lines to
 paste once into MD's **Main Menu → Plugins → Python Editor** and **Run**. After that,
-**Start MCP** in MD's Plugin tab starts the bridge.
+**Start/Stop MCP** in MD's Plugin tab starts the bridge, and stops it when clicked again.
 
 The extension's settings take the bridge port (`MD_MCP_PORT`, default 5121; set the
 same variable for MD if you change it) and the checkpoint folder.
@@ -50,18 +50,17 @@ path = r"C:\Users\you\AppData\Local\md-mcp\md_mcp_listener.py"
 exec(compile(open(path, encoding="utf-8").read(), path, "exec"), {"__file__": path, "__name__": "__main__"})
 ```
 
-That starts the bridge and adds **Start MCP** and **Stop MCP**
-to MD's Plugin tab; later sessions are one click there. Nothing listens until Start is
-clicked, because `run_md_python` executes arbitrary Python inside MD.
+That starts the bridge and adds **Start/Stop MCP** to MD's Plugin tab; later sessions
+are one click there, and a second click stops it. Nothing listens until it is clicked, because `run_md_python` executes arbitrary Python inside MD.
 
 The Run finishes straight away — a Windows timer on MD's main thread does the serving
-from then on — and the bridge stops with **Stop MCP** or when MD closes. If an entry
+from then on — and the bridge stops with a second click or when MD closes. If the entry
 does not appear, MD says why in
 `C:\Users\Public\Documents\MarvelousDesigner\New Assets\api_plugin_log.txt`.
 
-`plugin/README.md` covers registering the entries by hand, moving the port, and
-upgrading. After installing a new version, click **Stop MCP** then **Start MCP** so MD
-loads it; `md_status` says which version answered.
+`plugin/README.md` covers registering the entry by hand, moving the port, and
+upgrading. After installing a new version, click **Start/Stop MCP** twice (stop, then
+start) so MD loads it; `md_status` says which version answered.
 
 **From source** instead: `pip install -e .` in this checkout, and `.\plugin\install.ps1`
 for the plugin.

@@ -1,7 +1,14 @@
 """md-mcp listener — the live bridge, run inside Marvelous Designer.
 
-Two entries in MD's Plugin tab: **Start MCP** runs this file, and **Stop MCP** runs
-``md_mcp_stop.py`` beside it. There is no window.
+One entry in MD's Plugin tab, **Start/Stop MCP**, runs this file: it starts the bridge,
+and clicked while the bridge is listening it stops it. There is no window.
+``md_mcp_stop.py`` beside it still stops a running bridge, for anyone with an entry for
+it from an earlier version.
+
+One entry, because MD will not take two from one folder: registering
+``md_mcp_stop.py`` beside an already-registered listener was refused as "already
+registered" -- a script MD did not have (measured 2026-10-12, 2026.0.315, in MD's plugin
+log) -- and no Stop entry appeared, which left a bridge nothing could stop.
 
 Start opens a loopback port, arms a Windows timer that serves it, and **returns**. From
 then on Windows calls the timer from MD's own message loop, on MD's main thread, every
@@ -10,9 +17,10 @@ request that is complete, and gives the thread straight back. Stop kills the tim
 closes the port. Closing MD ends the process as it should, because nothing is holding
 MD's main thread in between.
 
-Click **Start MCP** in the Plugin tab if it has been registered there, or run the
-two-line bootstrap from the README in **Main Menu > Plugins > Python Editor**. The first
-top-level run also registers both entries, so every session after it is a click (see
+Click **Start/Stop MCP** in the Plugin tab if it has been registered there (an entry
+added by hand is named after the file, ``md_mcp_listener``, and does the same), or run
+the two-line bootstrap from the README in **Main Menu > Plugins > Python Editor**. The
+first top-level run also registers the entry, so every session after it is a click (see
 `register_plugin`).
 
 Starting is a click and never a side effect: `run` executes arbitrary Python inside MD,
@@ -758,8 +766,8 @@ def start(port=None, timer=None):
     MD closing.
 
     Called while a listener is already serving the port, it changes nothing and returns
-    that listener's state: a second click on Start MCP must not drop what the first is
-    serving.
+    that listener's state. (A second click on the Plugin tab entry stops the bridge, but
+    that is `main` deciding to; `start` never replaces a listener that is serving.)
 
     ``timer`` makes the timer; it defaults to the Windows one MD needs. The tests pass
     `_ThreadTimer`, for the reason its docstring gives.
@@ -876,15 +884,11 @@ def _write_marker(marker, done):
     return None
 
 
-#: What MD shows in the Plugin tab: one entry that starts the bridge, one that stops it.
-#: Exactly two, because MD's Plug-in Manager adds one `.py` at a time and MD has no call
-#: that removes one: every entry a plugin owns is a thing somebody may have to add by
-#: hand, and can only take back in Plug-in Manager.
-START_ENTRY = "Start MCP"
-STOP_ENTRY = "Stop MCP"
-
-#: The file Stop MCP runs. It ships beside this one.
-STOP_SCRIPT = "md_mcp_stop.py"
+#: What MD shows in the Plugin tab: one entry that starts the bridge and stops it. One,
+#: because MD refused a second script from this folder (see the module docstring) and
+#: has no call that removes an entry: every entry a plugin owns is a thing somebody may
+#: have to add by hand, and can only take back in Plug-in Manager.
+START_ENTRY = "Start/Stop MCP"
 
 
 def _plugin_list_path():
@@ -925,17 +929,8 @@ def _register(listener=None, marker=None, listing=None):
         ], True
 
     entries = [(START_ENTRY, listener)]
-    stopper = os.path.join(os.path.dirname(listener), STOP_SCRIPT)
     lines = []
     news = False
-    if os.path.isfile(stopper):
-        entries.append((STOP_ENTRY, stopper))
-    else:
-        lines.append(
-            "md-mcp: no {} beside {}, so there is no Stop MCP entry to register; "
-            "reinstall the plugin to get one.".format(STOP_SCRIPT, listener)
-        )
-        news = True
 
     marker = marker or _marker_path()
     done = _read_marker(marker)
@@ -1000,7 +995,7 @@ def _register(listener=None, marker=None, listing=None):
 
 
 def register_plugin(listener=None, marker=None, listing=None):
-    """Put Start MCP and Stop MCP in MD's Plugin tab. Returns lines saying what happened.
+    """Put Start/Stop MCP in MD's Plugin tab. Returns lines saying what happened.
 
     **Never raises.** This runs on the way to serving, and a bridge with no buttons is
     worth more than neither.
@@ -1041,26 +1036,31 @@ def _ask_md(call, name, path):
 
 
 def main():
-    """What Start MCP runs: register both entries once, start serving, and return."""
+    """What Start/Stop MCP runs: stop the bridge if it is listening; otherwise register
+    the entry once, start serving, and return."""
+    serving = running()
+    if serving is not None:
+        # The second click stops it, whichever build of this file armed it: every build
+        # leaves a "halt" on its state for md_mcp_stop.py to call, and so for this.
+        halt = serving.get("halt")
+        if callable(halt) and halt("Start/Stop MCP was clicked while listening"):
+            _report("stopped listening on {}:{} after {} request(s). Click Start/Stop "
+                    "MCP again to start it.".format(HOST, PORT, serving.get("requests", 0)))
+        else:
+            _report("could not stop the listener on {}:{}.".format(HOST, PORT))
+        return
     registered, news = [], False
     if os.environ.get("MD_MCP_NO_REGISTER") != "1":
         registered, news = _register()
         for line in registered:
             print(line)
-    was_running = running() is not None
     try:
-        state = start()
+        start()
     except (OSError, RuntimeError) as exc:
         _report("could not listen on {}:{}: {}".format(HOST, PORT, exc))
         return
-    if was_running:
-        message = "already listening on {}:{} ({} request(s) so far).".format(
-            HOST, PORT, state["requests"]
-        )
-    else:
-        message = "listening on {}:{}. Stop MCP in the Plugin tab stops it.".format(
-            HOST, PORT
-        )
+    message = "listening on {}:{}. Click Start/Stop MCP again to stop it.".format(
+        HOST, PORT)
     # A box only when something needs attention -- here, news about the entries. A
     # routine success is printed and nothing more: a modal box is a click every session,
     # and a dialog on screen is exactly what md-mcp warns about. md_status confirms the

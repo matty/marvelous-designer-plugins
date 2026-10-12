@@ -66,12 +66,13 @@ MD's host modules, so it installs and tests on a machine with no Marvelous Desig
 
 ## Running the listener inside MD
 
-If the plugin has been installed, click **Start MCP** in MD's Plugin tab (an install from
-before 2026-10-11 calls it **md-mcp**); a box appears only if it fails. **Stop MCP**
-stops it. Otherwise paste these two lines into **Main Menu → Plugins → Python Editor**,
+If the plugin has been installed, click **Start/Stop MCP** in MD's Plugin tab (an entry
+added by hand is named after the file, **md_mcp_listener**; earlier installs call it
+**Start MCP** or **md-mcp**); a box appears only if it fails. Clicking it again while it
+listens stops it. Otherwise paste these two lines into **Main Menu → Plugins → Python Editor**,
 then **Run**, with `<checkout>` replaced by this repo's path. Hand them over rather than the file's contents: MD keeps its own editor
 buffer and it is easy to run a stale copy without noticing — and a pasted body has no
-`__file__`, so it cannot register the entries either.
+`__file__`, so it cannot register the entry either.
 
 ```python
 path = r"<checkout>\plugin\md_mcp_listener.py"
@@ -82,29 +83,31 @@ exec(compile(open(path, encoding="utf-8").read(), path, "exec"), {"__file__": pa
 That run binds the port, arms a 10 ms `user32.SetTimer` timer and **returns**; Windows
 then calls the timer from MD's message loop, on MD's main thread, and each tick accepts,
 reads and answers what is ready and gives the thread straight back. It also registers
-Start MCP (this file) and Stop MCP (`md_mcp_stop.py` beside it) once per installed
-path. Nothing listens until Start is clicked, because `run` executes arbitrary Python
-inside MD. It serves until **Stop MCP**, a `shutdown` request, or MD closing — and
-closing MD now ends the process, which the old never-returning listener did not.
+Start/Stop MCP (this file) once per installed path. Nothing listens until it is clicked,
+because `run` executes arbitrary Python inside MD. It serves until the entry is clicked
+again, a `shutdown` request, or MD closing — and closing MD now ends the process, which
+the old never-returning listener did not.
 
 **A tick never runs inside another.** An MD call that pumps the message queue — a modal
 dialog does — lets the timer fire inside the request that made it; that inner tick
-returns at once, so one request at a time executes inside MD. Stop MCP finds the running
-listener on `builtins` (`__md_mcp_listeners__`), since it cannot import the listener
-without starting it. There is no window: the old `user32` panel and the loop that drove
-it were removed on 2026-10-11.
+returns at once, so one request at a time executes inside MD. The second click finds the
+running listener on `builtins` (`__md_mcp_listeners__`): every run of the file is a fresh
+namespace. (`md_mcp_stop.py` does the same, for an old Stop MCP entry.) There is no
+window: the old `user32` panel and the loop that drove it were removed on 2026-10-11.
 
 **`RegisterPythonScript` takes the path first: `(path, title)`.** For a month this repo
 passed `(title, path)` and blamed the `False` on "running inside another script"; MD's
 own plugin log (`C:\Users\Public\Documents\MarvelousDesigner\New Assets\api_plugin_log.txt`)
 showed it reading the title as a path (measured 2026-10-11). It also declines a path it
-already has, whatever the title. Read that log before theorising about a refusal, and
+already has, whatever the title, and refused `md_mcp_stop.py` beside the registered
+listener as "already registered" though it never had been, showing no entry (measured
+2026-10-12) -- which is why there is one entry that toggles. Read that log before theorising about a refusal, and
 never record a `False` as success: the entry would never be offered again. The plugin
 list itself is `…\MarvelousDesigner\Plugins\pluginSettings.json`, rewritten when MD exits.
 `plugin/README.md` has the GUI route.
 
-**After changing the listener, click Stop MCP and then Start MCP.** Start reads the file
-afresh; a listener left running keeps the code it was loaded with.
+**After changing the listener, click Start/Stop MCP twice** — stop, then start. Start
+reads the file afresh; a listener left running keeps the code it was loaded with.
 
 ## Tests
 
@@ -159,7 +162,7 @@ anything else.
 
 **A plugin clicked while a script is running executes nested inside it**, on MD's main
 thread, and can read and change that script's state through `builtins` — which is how
-Stop MCP reaches the listener. It is also why a clicked script must return promptly:
+a second click reaches the listener. It is also why a clicked script must return promptly:
 nothing below it moves until it does, and that includes the timer serving the bridge.
 
 **An MD line runs from one straight point to the next**, absorbing every curve point

@@ -1003,7 +1003,8 @@ kept referenced (it was stored on `builtins`), and an exception must never leave
 
 So a script that does not return is no longer the only way to outlive a script, and the
 listener is no longer one: from 2026-10-11 **Start MCP** arms a 10 ms timer and returns,
-and **Stop MCP** kills it. Before that the listener was a Run that never finished,
+and **Stop MCP** killed it; since 2026-10-12 one **Start/Stop MCP** entry does both (see
+Registering a plugin). Before that the listener was a Run that never finished,
 pumping MD's message queue to keep MD usable while it held the main thread, and closing
 MD left the process running behind it.
 
@@ -1054,7 +1055,7 @@ else is busy, not because anything is wrong.
 
 ### A stale listener produces tracebacks that cannot be read
 
-The listener is a script MD loaded when **Start MCP** was clicked. Editing
+The listener is a script MD loaded when **Start/Stop MCP** was clicked. Editing
 `md_mcp_listener.py` afterwards does not touch the running instance — and because Python
 reads the file off disk when it formats a traceback, a failure then reports **the running
 instance's line numbers beside the new file's source**. The two disagree, so the
@@ -1064,7 +1065,7 @@ traceback points at unrelated code: a division-by-zero inside a script was repor
 That reads as a bug in the listener. It is not; it means the listener in MD predates the
 file. Failure replies carry `plugin_version` and `plugin_build` for this reason, and the
 bridge appends them to the error. If the build is not the one just installed, **click
-Stop MCP, then Start MCP**, which reads the file afresh — the scene lives in MD, not in
+Start/Stop MCP twice** (stop, then start), which reads the file afresh — the scene lives in MD, not in
 the listener, so restarting it loses nothing.
 
 ### Registering a plugin
@@ -1088,6 +1089,16 @@ theory explained four failures through the old bridge; argument order explains t
 these too, and nothing now supports the nesting theory. The entry that worked on
 2026-09-19 is titled `md_mcp_listener`, after the file rather than any title this repo
 passed, so it was very likely added another way.
+
+**MD would not take a second script from the listener's folder.** On 2026-10-12, MD
+started fresh with only the hand-added `md_mcp_listener` entry in
+`Plugins/pluginSettings.json`, the listener's registration of `md_mcp_stop.py` was
+logged as "Skipped Python script registration because the script is already registered"
+and no Stop MCP entry appeared in the Plugin tab, then or in the saved list. Whether MD
+keys registrations on the folder is not settled -- one folder, one refusal -- but the
+consequence was: a bridge that could be started and not stopped. Since then the
+listener registers one entry, **Start/Stop MCP**, and a click while it is listening
+stops it.
 
 **A path MD already has is declined, whatever the title**, and a new script in the same
 folder as a registered one was declined too, with a log line claiming it was already
@@ -1120,8 +1131,8 @@ change the first one's state, which is how the old listener's Stop button worked
 set a flag and returned, and the loop below it acted on the flag when it resumed. And the
 first script cannot act on anything until the second returns, which is why a clicked
 script has to return promptly and why a modal dialog in it stops everything. With the
-timer listener nothing is running between requests, so a click on Stop MCP runs at top
-level and finds the listener on `builtins` all the same.
+timer listener nothing is running between requests, so a second click on Start/Stop MCP
+runs at top level and finds the listener on `builtins` all the same.
 
 **What MD gives a clicked plugin is not known.** Whether `__file__` or `__name__` is set,
 and where its `print` output goes, have not been measured. Anything registered should
@@ -1168,7 +1179,7 @@ still does not read as MD: stock Qt widgets wearing MD's palette look like a dar
 dialog, not like MD's own controls, which are drawn by MD. `plugin/md_mcp_listener.py`
 tried this, kept the measurements, and went back to a plain `user32` window rather than
 put ninety megabytes of PySide6 inside MD's interpreter for it — and since 2026-10-11 has
-no window at all, only Start MCP and Stop MCP in the Plugin tab.
+no window at all, only Start/Stop MCP in the Plugin tab.
 
 **A Qt widget must be driven from MD's main thread, without a loop of its own.** The old
 listener refreshed its panel from its serve loop, which pumped the Win32 queue and called

@@ -315,18 +315,16 @@ def _register(namespace, tmp_path, **kwargs):
     )
 
 
-def test_registering_puts_start_and_stop_in_mds_plugin_tab(listener, tmp_path) -> None:
-    # Two entries and no more. MD's Plug-in Manager adds one .py at a time and MD has no
-    # call that removes one, so every entry is something a person may add by hand if
-    # the API refuses, and can only take back in Plug-in Manager.
+def test_registering_puts_one_start_stop_entry_in_mds_plugin_tab(listener, tmp_path) -> None:
+    # One entry. MD refused a Stop script registered beside the listener as "already
+    # registered" and showed no entry (2026-10-12), and MD has no call that removes one:
+    # every entry is something a person may add by hand, and can only take back in
+    # Plug-in Manager.
     host, namespace = listener
 
     message = _register(namespace, tmp_path)
 
-    assert host.registered == [
-        ("Start MCP", str(LISTENER)),
-        ("Stop MCP", str(LISTENER.with_name("md_mcp_stop.py"))),
-    ]
+    assert host.registered == [("Start/Stop MCP", str(LISTENER))]
     assert "Plugin tab" in message
 
 
@@ -338,7 +336,7 @@ def test_registering_twice_asks_md_once(listener, tmp_path) -> None:
     _register(namespace, tmp_path)
     message = _register(namespace, tmp_path)
 
-    assert len(host.registered) == 2
+    assert len(host.registered) == 1
     assert "already in MD's Plugin tab" in message
 
 
@@ -364,17 +362,16 @@ def test_a_refusal_is_reported_once_and_not_asked_again(listener, tmp_path) -> N
 def test_a_script_already_in_mds_list_is_not_asked_for_under_any_title(
     listener, tmp_path
 ) -> None:
-    # MD declines a path it already has, whatever the title (measured): the existing
-    # md_mcp_listener entry is the Start entry, so asking only produces a refusal.
+    # MD declines a path it already has, whatever the title (measured): an entry added by
+    # hand, named md_mcp_listener after the file, is the Start/Stop entry, so asking
+    # only produces a refusal.
     host, namespace = listener
     write_md_plugin_list(tmp_path, str(LISTENER))
 
     message = _register(namespace, tmp_path)
 
-    asked = [c[1] for c in host.calls if c[0] == "RegisterPythonScript"]
-    assert asked == [str(LISTENER.with_name("md_mcp_stop.py"))]
-    assert "Start MCP (as 'md_mcp_listener') and Stop MCP" not in message
-    assert "Start MCP (as 'md_mcp_listener')" in message
+    assert [c for c in host.calls if c[0] == "RegisterPythonScript"] == []
+    assert "Start/Stop MCP (as 'md_mcp_listener')" in message
 
 
 def test_a_refused_registration_costs_a_button_and_not_a_bridge(
@@ -402,24 +399,6 @@ def test_a_listener_with_no_path_registers_nothing(monkeypatch, tmp_path) -> Non
     assert "no __file__" in message
 
 
-def test_a_listener_without_its_stop_script_registers_start_and_says_so(
-    monkeypatch, tmp_path
-) -> None:
-    # A Stop MCP entry pointing at a file that is not there is a button that fails
-    # when clicked, so it is not registered -- and the missing file is named.
-    lonely = tmp_path / "plugin" / "md_mcp_listener.py"
-    lonely.parent.mkdir()
-    lonely.write_bytes(LISTENER.read_bytes())
-
-    with fake_md(monkeypatch) as host:
-        namespace = load_listener({}, lonely)
-
-        message = _register(namespace, tmp_path)
-
-    assert host.registered == [("Start MCP", str(lonely))]
-    assert "md_mcp_stop.py" in message
-
-
 # ------------------------------------------------------------ clicking Start and Stop
 
 
@@ -444,34 +423,39 @@ def clicked_start(monkeypatch, tmp_path):
             stop_listener(port)
 
 
-def test_start_mcp_registers_both_entries_listens_and_returns(
+def test_start_mcp_registers_its_entry_listens_and_returns(
     monkeypatch, tmp_path
 ) -> None:
     with clicked_start(monkeypatch, tmp_path) as (host, namespace, port):
         assert namespace["main"]() is None  # it returns: the timer does the serving
 
         assert _wait_for_ping()["ok"]
-        assert [name for name, _ in host.registered] == ["Start MCP", "Stop MCP"]
-        # Said where it will be seen, with the entries' news, in one box.
+        assert [name for name, _ in host.registered] == ["Start/Stop MCP"]
+        # Said where it will be seen, with the entry's news, in one box.
         assert len(host.message_boxes) == 1
         assert "listening on 127.0.0.1:{}".format(port) in host.message_boxes[0]
-        assert "Start MCP" in host.message_boxes[0]
+        assert "Start/Stop MCP" in host.message_boxes[0]
 
 
-def test_clicking_start_mcp_again_leaves_it_serving(monkeypatch, tmp_path) -> None:
-    with clicked_start(monkeypatch, tmp_path) as (host, namespace, _):
+def test_clicking_the_entry_again_stops_it_and_a_third_click_starts_it(
+    monkeypatch, tmp_path
+) -> None:
+    # One entry starts and stops: MD would not register a Stop script from the
+    # listener's folder (2026-10-12), which left a bridge nothing in MD could stop.
+    with clicked_start(monkeypatch, tmp_path) as (host, namespace, port):
         namespace["main"]()
         _wait_for_ping()
-        first = namespace["running"]()
         host.message_boxes.clear()
 
         namespace["main"]()
 
-        # The same listener, not a replacement that shut the first one down to bind.
-        assert namespace["running"]() is first
-        assert bridge.ping()["ok"]
-        # Nothing needs attention, so nothing to dismiss: a routine click costs no box.
-        assert host.message_boxes == []
+        assert namespace["running"]() is None
+        assert _wait_until_silent(), "the second click left the port open"
+        assert len(host.message_boxes) == 1 and "stopped listening" in host.message_boxes[0]
+
+        namespace["main"]()
+
+        assert _wait_for_ping()["ok"]
 
 
 def test_start_mcp_with_the_port_taken_says_so(monkeypatch, tmp_path) -> None:

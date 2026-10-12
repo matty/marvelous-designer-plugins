@@ -14,8 +14,8 @@
     release always has one, a run straight from a checkout does not. Then prints the two
     lines to paste into MD once, and puts them on the clipboard.
 
-    Installing does not register anything: the Start MCP and Stop MCP entries in MD's
-    Plugin tab are registered inside MD, on the first run. See plugin/README.md.
+    Installing does not register anything: the Start/Stop MCP entry in MD's Plugin tab
+    is registered inside MD, on the first run. See plugin/README.md.
 
 .PARAMETER Destination
     Where to install. Defaults to %LOCALAPPDATA%\md-mcp.
@@ -153,9 +153,9 @@ catch {
 
 Write-Host ''
 Write-Host 'That Run starts the bridge and finishes; a message box appears only if it fails.'
-Write-Host 'It also adds two entries to MD''s Plugin tab, Start MCP and Stop MCP, so every'
-Write-Host 'later session is a click and no pasting. Closing MD stops the bridge too.'
+Write-Host 'It also adds Start/Stop MCP to MD''s Plugin tab, so every later session is a'
+Write-Host 'click and no pasting: click it to start the bridge, and again to stop it. Closing'
+Write-Host 'MD stops the bridge too.'
 Write-Host ''
-Write-Host 'If the entries do not appear, add them by hand -- Plugin tab > Plug-in Manager'
-Write-Host "> + ADD > $installed (Start MCP)"
-Write-Host "> + ADD > $(Join-Path $Destination 'md_mcp_stop.py') (Stop MCP)"
+Write-Host 'If the entry does not appear, add it by hand -- Plugin tab > Plug-in Manager'
+Write-Host "> + ADD > $installed"
