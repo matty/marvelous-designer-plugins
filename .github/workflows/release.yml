@@ -1,8 +1,9 @@
 name: Release
 
 # Both halves of the bridge, published together and carrying the same version: the
-# plugin zip that goes into Marvelous Designer, and the wheel that serves MCP. A build
-# where those two numbers disagree is the first thing to suspect when a bridge
+# plugin zip that goes into Marvelous Designer, and the MCP server -- as a wheel, and as
+# an .mcpb bundle that carries its own Python and a copy of the plugin. A build
+# where those numbers disagree is the first thing to suspect when a bridge
 # half-works, so the tag, pyproject and the stamped listener are checked to agree
 # before anything is uploaded.
 on:
@@ -14,7 +15,33 @@ permissions:
   contents: write
 
 jobs:
+  mcpb:
+    # Built on Windows because the build starts the bundle and lists its tools before
+    # it is allowed out; the release job below publishes it with everything else.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Build the MCPB bundle
+        run: python tools/build_mcpb.py --out dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mcpb
+          path: dist/*.mcpb
+          if-no-files-found: error
+
   release:
+    needs: mcpb
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -47,11 +74,16 @@ jobs:
       - name: Build the MCP server
         run: python -m build --outdir dist
 
+      - uses: actions/download-artifact@v4
+        with:
+          name: mcpb
+          path: dist
+
       - name: Checksums
         run: |
           cd dist
           rm -f ./*.sha256
-          sha256sum ./*.zip ./*.whl ./*.tar.gz > SHA256SUMS
+          sha256sum ./*.mcpb ./*.zip ./*.whl ./*.tar.gz > SHA256SUMS
           cat SHA256SUMS
           {
             echo '### Artifacts'
@@ -63,18 +95,23 @@ jobs:
       - name: Release notes
         run: |
           cat > dist/NOTES.md <<'NOTES'
-          Unzip `md-mcp-plugin-*.zip` and run `install.ps1`. It copies the listener
-          somewhere stable, verifies it against the manifest, and prints the two lines
-          to run once in **Main Menu > Plugins > Python Editor**. That run registers the
+          **Claude Desktop:** open `md-mcp-*.mcpb` (or drag it onto Claude Desktop's
+          Extensions settings). It carries its own Python, so nothing else needs
+          installing on that side. Then, with Marvelous Designer open, ask Claude for
+          `md_status`: it gives the two lines to paste into MD once.
+
+          **Other MCP clients:** unzip `md-mcp-plugin-*.zip` and run `install.ps1`. It
+          copies the listener somewhere stable, verifies it against the manifest, and
+          prints the two lines to run once in **Main Menu > Plugins > Python Editor**. That run registers the
           plugin in MD's Plugin tab, and every later session is one click.
 
-          The wheel is the other half, the MCP server. Both carry this version, and
-          `md_status` reports the one Marvelous Designer is actually running -- which is
-          not always the newest one installed, because MD keeps a registered plugin's
-          path for good.
+          The wheel is the other half, the MCP server, for clients that run it from a
+          Python of their own. Everything carries this version, and `md_status` reports
+          the listener Marvelous Designer is actually running -- which is not always the
+          newest one installed, because MD keeps a registered plugin's path for good.
 
-          Every artifact is hashed in `SHA256SUMS`. The plugin zip is reproducible:
-          building this commit again gives the same bytes.
+          Every artifact is hashed in `SHA256SUMS`. The plugin zip and the `.mcpb` are
+          reproducible: building this commit again gives the same bytes.
           NOTES
 
       - name: Publish
@@ -86,7 +123,7 @@ jobs:
             --title "$GITHUB_REF_NAME" \
             --notes-file dist/NOTES.md \
             --generate-notes \
-            dist/*.zip dist/*.whl dist/*.tar.gz dist/SHA256SUMS
+            dist/*.mcpb dist/*.zip dist/*.whl dist/*.tar.gz dist/SHA256SUMS
 
       - uses: actions/upload-artifact@v4
         with:
