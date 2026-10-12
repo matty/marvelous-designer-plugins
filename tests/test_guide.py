@@ -8,7 +8,8 @@ from md_mcp import guide
 from md_mcp.server import build_server
 from tests.test_server import call, error_text, payload
 
-TOPICS = ["workflow", "readback", "seams", "placement", "saving", "simulation"]
+TOPICS = ["workflow", "building", "readback", "seams", "placement", "fitting", "saving",
+          "simulation"]
 
 
 def test_the_guide_ships_with_the_package() -> None:

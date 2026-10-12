@@ -4,9 +4,13 @@
 `md_api` searches everything the running build exposes, `md_call` calls any of it,
 `run_md_python` runs a script inside MD, `md_status` says whether MD is there at all.
 
-Nothing is wrapped, curated or modelled. MD ships around 700 calls across six modules;
-all of them are reachable, and this repo's job is only to carry them across the process
-boundary faithfully and to fail legibly when it cannot.
+The raw API stays whole: MD ships around 700 calls across six modules, all of them
+reachable unwrapped, carried across the process boundary faithfully and failing legibly
+when they cannot. On top of it sits a **construction layer** -- `md_draft_piece`,
+`md_sew`, and placement to come -- that builds with those calls and then checks what MD
+did. It may decide *how* to build (which point types, which line, which flags); it never
+decides *what* to build. The garment is the caller's, and every construction tool reads
+MD back rather than trusting its own plan.
 
 The one addition is `src/md_mcp/notes.py`: MD's bindings ship no prose, so a measured
 note rides along with a call's signature where one exists. It **annotates and never
@@ -22,19 +26,30 @@ python -m venv .venv
 .venv\Scripts\python.exe -m pytest                  # no MD needed
 .venv\Scripts\python.exe -m pytest -m md_required   # with MD open; most need it empty
 python tools\build_plugin.py                        # dist/md-mcp-plugin-<version>.zip
+python tools\build_mcpb.py                          # dist/md-mcp-<version>.mcpb (Windows)
 ```
 
 Register with an MCP client as the `md-mcp` command (`.venv\Scripts\md-mcp.exe`), and
-the MD half with `plugin\install.ps1`.
+the MD half with `plugin\install.ps1`. Claude Desktop users get the `.mcpb` instead: it
+bundles CPython's embeddable build, the locked wheels and the stamped plugin, and its
+build refuses to finish until the unpacked bundle has started and listed its tools.
 
 ## Layout
 
 ```
 src/md_mcp/server.py   The MCP tools: the raw API, and the tools that read MD back.
 src/md_mcp/guide.md    What md_guide serves: measured facts about MD, kept short.
+src/md_mcp/drafting.py Plans a piece from named edges and judges MD's read-back. No MD.
+src/md_mcp/sewing.py   Plans one seam from edge names and confirms it in the ledger.
+src/md_mcp/geometry.py OBJ meshes: exact body sections, landmarks, pieces registered to
+                       their pattern through any texture mapping. No MD.
+src/md_mcp/fit.py      Seams, pieces and rings checked in 3D against the body. No MD.
 src/md_mcp/bridge.py   md-mcp's end of the socket MD listens on.
 plugin/                The other end: the listener that runs inside MD, and its installer.
 tools/build_plugin.py  Packages the listener for MD: stamped, hashed, reproducible.
+tools/build_mcpb.py    The Claude Desktop bundle: server, its own Python, the plugin.
+packaging/mcpb/        The bundle's dependency lock (hashed; --relock rewrites it) and
+                       the MCPB manifest schema it is validated against.
 .github/workflows/     Tests on every push; a `v*` tag publishes the zip and the wheel.
 docs/md-conventions.md How MD behaves. Measured against a real build, not assumed.
 docs/garment-preflight.md  Checks to run before and after changing a garment.
@@ -114,6 +129,12 @@ restores anything.
 (`isidentifier()`), or a name is arbitrary code inside MD. The module whitelist alone is
 not a check — a payload needs no dot to escape it.
 
+**An OBJ's `vt` is not millimetres.** It is the pattern position only for MD's default
+fabric; a textured fabric scales it, and unevenly for a twill (measured 2026-10-12).
+`geometry.Piece.register_outline` fits the map; anything reading `vt` directly is
+measuring the fabric's texture, and was the cause of a T-shirt reported with seams
+150 mm open that had closed.
+
 **A wrong seam builds cleanly.** `AddSeamlinePairGroup` returns `False` for an index that
 does not exist, but it validates indices, not meaning: a seam joining a hem to a neckline is accepted and
 counted. Whatever you build, count what MD ended up with; the scene looking right is not
@@ -153,11 +174,14 @@ to be wrong, fix it in the same commit as the code and say which MD version you 
 ## Before garment mutations
 
 Read docs/garment-preflight.md for the recommended construction checks, and load only
-the relevant measured sections of docs/md-conventions.md. Keep the transport generic:
-md-mcp's tools check and show what MD did -- `md_seams` reads the ledger back and warns
-on an edge sewn twice or to itself -- and none of them replaces MD's API or encodes
-garment design. A count proves neither correct sewing nor collision
-freedom.
+the relevant measured sections of docs/md-conventions.md. Construction tools refuse what
+MD would accept and build wrong, then read the result back -- `md_sew` checks the ledger
+for exactly the seam it planned -- and none of them hides the raw API or chooses the
+garment. A count proves neither correct sewing nor collision freedom.
+
+**Edge names live in the garment's metadata** (`md_mcp.pieces`, via
+`ChangeMetaDataValueForCurrentGarment`). `SetAPIMetaData` looks like the place and
+returns False for every key (measured 2026-10-12).
 
 Every run returns the complete available scene list. Do not reintroduce listener-global
 suppression: API queries and independent MCP clients also consume run replies.

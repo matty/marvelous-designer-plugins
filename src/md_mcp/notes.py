@@ -92,6 +92,22 @@ NOTES: dict[str, str] = {
         "what it made. Use CopyPatternPieceMove when the result has to be sewn."
     ),
     # -- Simulation ------------------------------------------------------------------
+    "utility_api.SetAPIMetaData": (
+        "Returned False for every key tried and stored nothing; GetAPIMetaData then "
+        "answers '' (2026-10-12). To keep data with a garment use "
+        "ChangeMetaDataValueForCurrentGarment, which works."
+    ),
+    "utility_api.ChangeMetaDataValueForCurrentGarment": (
+        "Adds or replaces one key of the garment's metadata, a JSON object read whole "
+        "with GetMetaDataForCurrentGarment (an empty object when unset), and leaves "
+        "the other keys alone; SetMetaDataForCurrentGarment replaces the whole object. The value "
+        "survives ExportZPac and ImportZpac, and NewProject clears it (2026-10-12). "
+        "md_draft_piece keeps its edge names under 'md_mcp.pieces'."
+    ),
+    "pattern_api.GetBoundingBoxOfPattern": (
+        "Answers only {'Width', 'Height'}, as strings -- no position. "
+        "GetPatternPiecePos gives the box's centre (2026-10-12)."
+    ),
     "utility_api.Simulate": (
         "Runs n solver steps and returns True for ANY n, including n=1, which leaves the "
         "garment flat and reports success. Steps accumulate across calls; a few hundred "
@@ -145,20 +161,32 @@ NOTES: dict[str, str] = {
         "(on Neck_Back 50 was the back of the neck, 0 and 100 both the front), y along "
         "it, and offset is distance from it, about 2mm a unit on Nardo. Measured "
         "2026-10-11, 2026.0.315, which overturned an earlier 'does nothing' that read "
-        "the piece without re-placing it."
+        "the piece without re-placing it. They are coordinates on the volume, not "
+        "offsets from the point: Body_Front_Center_5 and Body_Back_Center_5 put a piece "
+        "in the same place for the same values on Genesis 8 (2026-10-12), where y ran a "
+        "piece's centre 888-1467 mm, offset 2 mm a unit, and x 50 the front, 25 the "
+        "avatar's left, 0 the back. md_place searches them to a height and clearance."
     ),
     "pattern_api.SetArrangement": (
         "Does nothing, silently, when GetArrangementList() is empty -- which is how the "
         "shipped Genesis8_Female.avt loads, and "
-        "ImportExportOption.bAddArrangementPoints = True does not add any. An imported "
-        "avatar can carry them (109 named points on the measured scene), so read the "
-        "list rather than assuming either way. Without points a garment still drafts, "
+        "ImportExportOption.bAddArrangementPoints = True does not add any. MD ships "
+        "points that can be added: import_api.ImportFile of Preset/Avatar/Arrangement/"
+        "Adult_V2_Arrangement_Bounding_Volume.pan and then Adult_V2_Arrangement_Point.arr "
+        "gave Genesis 8 109 points that sit on its body (2026-10-12). Without points a garment still drafts, "
         "sews and simulates; it just falls instead of draping on the body. With points, "
         "it puts the piece's 2D bounding-box centre on the point and maps 2D +y to 3D "
         "up. A point is not where its name says: points sit on bounding volumes sized by "
         "the whole avatar, so on one with a long tail Body_Back_Center_1 put a piece near "
         "z = -1150, a metre behind a back surface at z = -116. Resolve the point's world "
         "position rather than trusting its name, and read where the piece landed."
+    ),
+    "import_api.ImportFile": (
+        "Imports MD's own asset files by path. Measured 2026-10-12: after ImportAvatar of "
+        "the shipped Genesis8_Female.avt, ImportFile of Preset/Avatar/Arrangement/"
+        "Adult_V2_Arrangement_Bounding_Volume.pan (True; still no points) and then "
+        "Adult_V2_Arrangement_Point.arr gave the avatar 109 arrangement points on its "
+        "body. Import the .pan first."
     ),
     "utility_api.ResetClothArrangement": (
         "Re-places every piece at its arrangement point, applying offsets written by "
@@ -170,9 +198,10 @@ NOTES: dict[str, str] = {
         "Read this before arranging anything: an empty list means there is nowhere to "
         "arrange to, and SetArrangement then does nothing while the readbacks still "
         "answer. The shipped Genesis8_Female.avt loads with none and "
-        "ImportExportOption.bAddArrangementPoints = True does not add any, while an "
-        "imported avatar measured 109 named points -- so it is worth reading, not "
-        "assuming. A name is not a position: on a tailed avatar the Body_* points "
+        "ImportExportOption.bAddArrangementPoints = True does not add any; "
+        "import_api.ImportFile of MD's own Adult_V2_Arrangement_Bounding_Volume.pan and "
+        "then Adult_V2_Arrangement_Point.arr (Preset/Avatar/Arrangement) gave it 109 "
+        "(2026-10-12). So it is worth reading, not assuming. A name is not a position: on a tailed avatar the Body_* points "
         "measured up to a metre off the body -- see SetArrangement."
     ),
     "pattern_api.GetArrangementOfPattern": (
@@ -278,10 +307,13 @@ NOTES: dict[str, str] = {
         "topstitch geometry from pattern pieces when a surface will not take a fabric."
     ),
     "pattern_api.SetPatternPieceElastic": (
-        "Accepted, returns None, and has no getter anywhere -- 'accepted' is the whole of "
-        "what can be said, and nothing here claims it took effect. _lineIndex == -1 means "
-        "every edge of the piece, so an off-by-one that produces -1 silently does the "
-        "whole piece."
+        "Accepted, returns None, and has no getter -- but its effect can be measured, "
+        "and it works: elastic on a twill skirt's two waist edges (with "
+        "SetPatternPieceElasticTotalLength 300 or 250) held the waist at 1149 mm on "
+        "Genesis 8, against 1099 mm and 13 % stretch without it (2026-10-12; md_fit's "
+        "rings). The two lengths gave the same drape: the line tightened onto the body. "
+        "_lineIndex == -1 means every edge of the piece, so an off-by-one that produces "
+        "-1 silently does the whole piece."
     ),
     "pattern_api.SetPatternPieceElasticStrength": (
         "No getter, and _lineIndex == -1 is every edge of the piece -- see "
@@ -331,7 +363,16 @@ NOTES: dict[str, str] = {
         "scene and three of two sewn panels before simulating were byte-identical. "
         "Under the timer listener (2026-10-11) draped captures were identical in two "
         "runs of three. Either way a hash says nothing about the scene: compare the "
-        "pictures."
+        "pictures. With MD's 3D window closed it raises a modal 'Snapshot is only "
+        "available when the 3D window is displayed' instead (measured 2026-10-12)."
+    ),
+    "export_api.ExportSnapshot2D": (
+        "Draws the 2D pattern to a PNG and returns [] having written it (measured "
+        "2026-10-12). The int is a mode: 0 draws every piece's outline whole, whatever "
+        "the 2D window shows, at about 10500 px wide; 1 captured the 2D window as zoomed. "
+        "On an empty board it raises a modal 'There are no patterns' that holds MD's "
+        "main thread until clicked. md_snapshot(pattern=True) uses mode 0 and refuses an "
+        "empty board."
     ),
     "export_api.ExportTurntableImages": (
         "Returns [] and writes no files. To get views round a garment, step "
@@ -351,7 +392,10 @@ NOTES: dict[str, str] = {
         "call wrote both. Check the files. Output is millimetres, Y up, +Z the avatar's "
         "front; bExportAvatar=True with bExportGarment=False exports the avatar alone, "
         "and parsing an export is the only route found to an avatar's size or a piece's "
-        "3D bounds."
+        "3D bounds. Each garment vertex's vt is its 2D pattern position up to an affine "
+        "map set by the fabric -- mm centred on the piece for the default fabric, scaled "
+        "by the texture for others (2026-10-12) -- so md_fit registers pieces rather than "
+        "reading vt as mm."
     ),
     "utility_api.GetClothPositions": (
         "Cannot return anything to Python: its C++ side fills a std::vector<float>&, "

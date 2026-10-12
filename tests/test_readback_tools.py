@@ -510,6 +510,33 @@ def test_front_side_and_back_come_back_in_one_call(md, server) -> None:
     assert not [path for path in md.written if os.path.exists(path)]
 
 
+def test_an_empty_board_is_not_drawn(md, server) -> None:
+    # MD raises a modal "There are no patterns" for it, which stops the bridge.
+    assert "no pattern pieces" in error_text(call(server, "md_snapshot", {"pattern": True}))
+    assert not [c for c in md.calls if c[0] == "ExportSnapshot2D"]
+
+
+def test_the_pattern_is_drawn_whole_and_leaves_the_camera_alone(md, server) -> None:
+    md.piece_names.append("front")
+    meta, data = image_of(call(server, "md_snapshot", {"pattern": True, "max_size": 0}))
+
+    assert data == png_bytes(1050, 445)
+    assert meta["view"] == "pattern" and "2D pattern" in meta["facing"]
+    # Mode 0 draws every outline whole; mode 1 captured the 2D window as zoomed.
+    assert [c for c in md.calls if c[0] == "ExportSnapshot2D"][0][2] == 0
+    assert not [c for c in md.calls if c[0] in ("SetCamViewPoint", "ExportSnapshot3D")]
+    assert not [path for path in md.written if os.path.exists(path)]
+
+
+def test_the_pattern_follows_the_views_asked_for(md, server) -> None:
+    md.piece_names.append("front")
+    result = call(server, "md_snapshot", {"views": [2, 8], "pattern": True, "max_size": 0})
+
+    metas = json.loads(result.content[0].text)["views"]
+    assert [m["view"] for m in metas] == [2, 8, "pattern"]
+    assert len(result.content) == 4
+
+
 def test_view_and_views_together_are_refused(md, server) -> None:
     assert "not both" in error_text(call(server, "md_snapshot", {"view": 2, "views": [4]}))
     assert not md.calls

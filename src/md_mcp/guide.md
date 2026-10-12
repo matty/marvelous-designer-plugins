@@ -12,12 +12,23 @@ What has been measured about MD 2026.0.315, kept short. Every point is backed by
 3. `md_checkpoint` before anything you may want back. MD's API has no undo, and nothing
    removes a seam; `md_restore` is the only way back.
 4. Read the scene back after every step. Return values are not evidence (see `readback`).
-5. After sewing, `md_seams`. After moving or draping, `md_measure` and
-   `md_snapshot(views=[2, 4, 8])` for front, side and back.
+5. After sewing, `md_seams`. After draping, `md_fit` and `md_snapshot(views=[2, 4, 8])`;
+   `md_snapshot(pattern=True)` shows the 2D pattern.
 6. If a reply mentions a dialog, look at MD: nothing reaches MD until it is dismissed, and
    the call that raised it may not have done what its reply said.
 
 Lengths are millimetres. In 2D, x is right and y is up.
+
+## building
+
+- `md_draft_piece` builds a piece from named edges: corners in order, each starting an
+  edge, curve points under `through`. Edge i is MD's line i, so a point sewn to two
+  pieces must be a corner. It refuses outlines MD would build wrong, keeps pieces apart
+  on the 2D board, and checks MD's corners and lengths before storing the names.
+- `md_sew("front.side", "back.centre", ends="opposite")` sews by name. `ends` has no
+  default: the wrong one builds a twisted seam MD accepts. It refuses an edge sewn to
+  itself or twice, and lengths over 5 mm apart unless raised, then checks the ledger.
+- Edge names travel in `md_checkpoint`; `md_edges` lists them and flags a reshaped piece.
 
 ## readback
 
@@ -45,16 +56,29 @@ Lengths are millimetres. In 2D, x is right and y is up.
 
 ## placement
 
-- `SetArrangement(piece, point)` puts the centre of the piece's 2D bounding box on an
-  arrangement point. A point's name is not its position: on an avatar with a tail, body
-  points sat about a metre off the body. `md_arrangement_points` finds where they are.
-- `SetArrangementPosition(piece, x, y, offset)`, each 0 to 100, moves the piece round the
-  point's bounding volume, along it, and out from it -- but only once the piece is
-  re-placed: call `SetArrangementOrientation(piece, <its current orientation>)` after it.
-  `ResetClothArrangement()` re-places every piece and loses any drape.
-- `SetArrangementOrientation` is in degrees, and the default is 180.
-- There is no call that moves a piece freely in 3D. Read where it landed with
-  `md_measure`.
+- `SetArrangement(piece, point)` puts the centre of the piece's 2D box on a point. Names
+  are not positions: on a tailed avatar body points sat a metre off the body.
+- No points? `import_api.ImportFile` MD's `Preset/Avatar/Arrangement/Adult_V2_Arrangement_
+  Bounding_Volume.pan`, then `Adult_V2_Arrangement_Point.arr`: Genesis 8 gets 109.
+- `SetArrangementPosition` x, y, offset (0-100) are coordinates on the point's volume.
+  `md_place` searches them to a height and a clearance, clear of pieces it placed before.
+- Prefer "Flat". "Curved" started a skirt inside the hips and a seam caught open.
+- Place sleeves before the body: placed after, they were pushed out to clear the back
+  and their underarm seams closed through the arm.
+
+## fitting
+
+- `md_body`: heights, girths and front/back arcs at waist, hip and bust, and the
+  shoulder line. Draft fronts and backs to their arcs: Genesis 8's bust is 560 mm in
+  front and 378 behind, and fronts cut to a quarter were pulled apart.
+- `md_fit` (`draped=True` after a drape): cloth in the body, pieces through each other,
+  open seams; `rings` with stretch and ease against the body in each ring's own plane;
+  `gaps` between unsewn edges. A ring stretched over 5 % is carrying load.
+- A seam path crossing an arm is usually fine; the body through the cloth is not.
+- Measured on a jacket: an armhole needs ease over the arm root (none: 12 % stretch, the
+  arm through the sleeve); a sleeve's underarm seam is the arm's length, its cap on top;
+  open fronts swing into the arms unless a short tack holds them.
+- A plain waist slides ~10 %; `SetPatternPieceElastic` held a skirt at the waist.
 
 ## saving
 

@@ -106,6 +106,23 @@ def test_front_side_and_back_are_three_different_pictures(empty) -> None:
     assert len(digests) == 3, "front, side and back came back as the same picture"
 
 
+def test_the_2d_pattern_snapshot_draws_the_pieces(empty) -> None:
+    # On an empty board ExportSnapshot2D raises a modal "There are no patterns" that
+    # stops the bridge until someone clicks it (measured 2026-10-12): refused instead.
+    with pytest.raises(bridge.BridgeError, match="no pattern pieces"):
+        bridge.snapshots(["pattern"])
+    # With pieces it returns [] and still writes the file; the picture follows the board.
+    bridge.call("pattern_api.CreatePatternWithPoints",
+                [[[0.0, 0.0, 0], [300.0, 0.0, 0], [300.0, 400.0, 0], [0.0, 400.0, 0]]])
+    (one, meta), = bridge.snapshots(["pattern"])
+    bridge.call("pattern_api.CreatePatternWithPoints",
+                [[[500.0, 0.0, 0], [900.0, 0.0, 0], [700.0, 300.0, 0]]])
+    (two, _), = bridge.snapshots(["pattern"])
+
+    assert one.startswith(PNG) and meta["view"] == "pattern"
+    assert hashlib.sha256(one).digest() != hashlib.sha256(two).digest()
+
+
 # ------------------------------------------------------------------ md_fabric_presets
 
 

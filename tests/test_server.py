@@ -31,6 +31,12 @@ TOOLS = [
     "md_checkpoint",
     "md_restore",
     "md_guide",
+    "md_draft_piece",
+    "md_sew",
+    "md_edges",
+    "md_body",
+    "md_fit",
+    "md_place",
 ]
 
 

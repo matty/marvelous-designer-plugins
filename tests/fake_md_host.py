@@ -120,6 +120,10 @@ class FakeMDHost:
         self.unsaved = False
         #: Every file an export actually wrote, so a test can prove they were removed.
         self.written: list[str] = []
+        #: The garment's metadata object, where md-mcp keeps its edge maps. False makes
+        #: a change silently not stick, to prove the read-back catches it.
+        self.metadata: dict[str, str] = {}
+        self.metadata_keeps = True
 
     # ------------------------------------------------------------ pattern_api
 
@@ -156,12 +160,79 @@ class FakeMDHost:
         self.placements[piece] = self.arrangement_points[point][1]
         return True
 
-    def _line_lengths(self, index: int) -> list[float]:
+    def _lines(self, index: int) -> list[list[tuple[float, float]]]:
+        """Each line's points, corner to corner, as MD numbers them.
+
+        Measured on 2026.0.315: a line runs from one straight (type 0) point to the next
+        and takes in every curve point between, and line i starts at straight point i.
+        A curve is measured here as the polyline through its points, which MD's spline
+        is not -- close enough for the protocol, never evidence about MD's lengths.
+        """
         points = self.piece_points[index]
+        corners = [k for k, point in enumerate(points) if len(point) < 3 or point[2] == 0]
+        if not corners:
+            corners = [0]
+        lines = []
+        for n, start in enumerate(corners):
+            end = corners[(n + 1) % len(corners)]
+            run = []
+            k = start
+            while True:
+                run.append(points[k][:2])
+                k = (k + 1) % len(points)
+                if k == end:
+                    run.append(points[k][:2])
+                    break
+            lines.append(run)
+        return lines
+
+    def _line_lengths(self, index: int) -> list[float]:
         return [
-            math.dist(points[k][:2], points[(k + 1) % len(points)][:2])
-            for k in range(len(points))
+            sum(math.dist(a, b) for a, b in zip(line, line[1:]))
+            for line in self._lines(index)
         ]
+
+    def GetPatternInputInformation(self, index: int) -> str:
+        """MD's shape (2026-10-12): a JSON string, counts first, then one entry each."""
+        corners = [line[0] for line in self._lines(index)]
+        lengths = self._line_lengths(index)
+        return json.dumps({"Pattern InputInformation": [{
+            "LineList": [{"Line count": str(len(lengths))}] + [
+                {"Line index": str(k), "Line length": length,
+                 "Line type": "Straight type"} for k, length in enumerate(lengths)],
+            "Pattern index": str(index),
+            "Pattern name": self.piece_names[index],
+            "PointList": [{"Point count": str(len(corners))}] + [
+                {"Point index": str(k), "Point positionX": x, "Point positionY": y}
+                for k, (x, y) in enumerate(corners)],
+        }]}, indent=1)
+
+    def GetPatternPiecePos(self, index: int) -> list[float]:
+        """The centre of the piece's 2D box, as MD answers it."""
+        points = self.piece_points[index]
+        xs, ys = [p[0] for p in points], [p[1] for p in points]
+        return [(min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2]
+
+    def GetBoundingBoxOfPattern(self, index: int) -> dict:
+        """Width and Height only, as strings, as MD answers them."""
+        points = self.piece_points[index]
+        xs, ys = [p[0] for p in points], [p[1] for p in points]
+        return {"Height": f"{max(ys) - min(ys):f}", "Width": f"{max(xs) - min(xs):f}"}
+
+    def SetAPIMetaData(self, key: str, value: str) -> bool:
+        # Measured 2026-10-12: False for every key tried, and nothing stored.
+        self.calls.append(("SetAPIMetaData", key))
+        return False
+
+    def ChangeMetaDataValueForCurrentGarment(self, key: str, value: str) -> None:
+        """Adds or replaces one key of the garment's metadata object (measured)."""
+        self.calls.append(("ChangeMetaDataValueForCurrentGarment", key))
+        if self.metadata_keeps:
+            self.metadata[key] = value
+
+    def GetMetaDataForCurrentGarment(self) -> str:
+        # MD answers "{\n}" for a garment with no metadata (measured 2026-10-12).
+        return json.dumps(self.metadata, indent=1) if self.metadata else "{\n}"
 
     def GetLineLength(self, index: int, line: int) -> float:
         return self._line_lengths(index)[line]
@@ -175,14 +246,14 @@ class FakeMDHost:
         """
         self.calls.append(("ExportPatternJSON", path))
         patterns = []
-        for index, points in enumerate(self.piece_points):
+        for index in range(len(self.piece_points)):
             lines = [
                 {"ID": f"L{index}-{k}", "PointList": [
                     {"ID": f"P{index}-{k}-{e}", "PointType": "Straight",
                      "Position": {"x": point[0], "y": point[1]}}
-                    for e, point in enumerate((points[k], points[(k + 1) % len(points)]))
+                    for e, point in enumerate(line)
                 ]}
-                for k in range(len(points))
+                for k, line in enumerate(self._lines(index))
             ]
             patterns.append({"ID": f"S{index}", "Name": self.piece_names[index],
                              "ShapeInfo": {"IsSlashed": False, "LineList": lines}})
@@ -239,20 +310,29 @@ class FakeMDHost:
         self.calls.append(("ExportOBJ", path, option.bExportAvatar, option.bExportGarment))
         lines = ["# fake Marvelous Designer", "mtllib fake.mtl"]
         count = 0
+        uv_count = 0
 
-        def block(group: str | None, vertices, style: str) -> None:
-            nonlocal count
+        def block(group: str | None, vertices, style: str, uvs=None) -> None:
+            # A fan from the first vertex: its only once-used edges are the outline's,
+            # which is all md_fit needs of a piece's mesh.
+            nonlocal count, uv_count
             if group is not None:
                 lines.append(f"g {group}")
             lines.extend("v {} {} {}".format(*vertex) for vertex in vertices)
-            first = count + 1
+            if uvs:
+                lines.extend(f"vt {u} {v}" for u, v in uvs)
+            first, first_uv = count + 1, uv_count + 1
             count += len(vertices)
+            uv_count += len(uvs or [])
             for k in range(1, len(vertices) - 1):
-                corners = (first, first + k, first + k + 1)
-                if style == "normals":
-                    lines.append("f " + " ".join(f"{c}//{c}" for c in corners))
+                offsets = (0, k, k + 1)
+                if uvs:
+                    lines.append("f " + " ".join(
+                        f"{first + o}/{first_uv + o}/{first + o}" for o in offsets))
+                elif style == "normals":
+                    lines.append("f " + " ".join(f"{first + o}//{first + o}" for o in offsets))
                 else:
-                    lines.append("f " + " ".join(str(c) for c in corners))
+                    lines.append("f " + " ".join(str(first + o) for o in offsets))
 
         if option.bExportAvatar and self.avatars and self.avatar_vertices:
             block("Mesh", self.avatar_vertices, "normals")
@@ -261,11 +341,24 @@ class FakeMDHost:
                 group = {"piece": name, "generic": f"Pattern_{index}", "none": None}[
                     self.obj_groups
                 ]
-                block(group, self.piece_vertices(index), "plain")
+                # vt: the 2D position relative to the piece's 2D box centre, in mm --
+                # MD's mapping for its default fabric (measured 2026-10-12).
+                outline = self.piece_points[index]
+                cx, cy = self.GetPatternPiecePos(index)
+                block(group, self.piece_vertices(index), "plain",
+                      [(p[0] - cx, p[1] - cy) for p in outline])
         material = os.path.splitext(path)[0] + ".mtl"
         if self._write(path, ("\n".join(lines) + "\n").encode("utf-8")):
             self._write(material, b"newmtl fake\n")
         return [path, material]
+
+    def ExportSnapshot2D(self, path: str, mode: int) -> list:
+        # Measured 2026-10-12: writes the file and returns [], like ExportSnapshot3D.
+        self.calls.append(("ExportSnapshot2D", path, mode))
+        if not self.piece_names:
+            raise AssertionError("a real MD would now be showing a modal dialog")
+        self._write(path, png_bytes(1050, 445))
+        return []
 
     def ExportSnapshot3D(self, path: str) -> list:
         self.calls.append(("ExportSnapshot3D", path))
@@ -428,6 +521,7 @@ class FakeMDHost:
         self.seam_groups = 0
         self.seams.clear()
         self.avatars.clear()
+        self.metadata.clear()
 
     def modules(self) -> dict[str, types.ModuleType]:
         pattern_api = types.ModuleType("pattern_api")
@@ -445,6 +539,9 @@ class FakeMDHost:
             "SetArrangement",
             "ExportPatternJSON",
             "ExportObjectBrowserMaterialsList",
+            "GetPatternInputInformation",
+            "GetPatternPiecePos",
+            "GetBoundingBoxOfPattern",
         ):
             setattr(pattern_api, name, getattr(self, name))
         for name in (
@@ -464,6 +561,10 @@ class FakeMDHost:
         utility_api.RegisterPythonScript = self.RegisterPythonScript
         utility_api.RegisterPythonScriptW = self.RegisterPythonScript
         utility_api.DisplayMessageBox = self.DisplayMessageBox
+        utility_api.SetAPIMetaData = self.SetAPIMetaData
+        utility_api.ChangeMetaDataValueForCurrentGarment = (
+            self.ChangeMetaDataValueForCurrentGarment)
+        utility_api.GetMetaDataForCurrentGarment = self.GetMetaDataForCurrentGarment
         utility_api.SetCamViewPoint = self.SetCamViewPoint
         utility_api.Refresh3DWindow = self.Refresh3DWindow
 
@@ -475,6 +576,7 @@ class FakeMDHost:
         for name in (
             "ExportOBJ",
             "ExportSnapshot3D",
+            "ExportSnapshot2D",
             "ExportZPrj",
             "ExportZPac",
             "ExportTurntableImages",

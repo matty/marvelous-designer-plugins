@@ -24,6 +24,7 @@ is the opposite of true.
 from __future__ import annotations
 
 import functools
+import json
 import os
 import pathlib
 import struct
@@ -36,7 +37,9 @@ from mcp.server.mcpserver import Image, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 
-from md_mcp import __version__, bridge, checkpoints, dialogs, guide, seams
+from md_mcp import (
+    __version__, bridge, checkpoints, dialogs, drafting, fit, geometry, guide, seams, sewing,
+)
 
 
 def _reportable(fn: Callable) -> Callable:
@@ -299,6 +302,9 @@ READS = ToolAnnotations(read_only_hint=True, idempotent_hint=True, open_world_hi
 TOUCHES = ToolAnnotations(read_only_hint=False, destructive_hint=False, open_world_hint=False)
 #: Runs whatever it is given inside MD, which has no undo.
 CHANGES = ToolAnnotations(read_only_hint=False, destructive_hint=True, open_world_hint=False)
+#: Adds to the garment -- a piece, a seam -- and changes nothing already there. MD has
+#: no call that removes a seam, so a wrong one is undone by md_restore.
+BUILDS = ToolAnnotations(read_only_hint=False, destructive_hint=False, open_world_hint=False)
 #: Discards the open garment.
 REPLACES = ToolAnnotations(read_only_hint=False, destructive_hint=True, open_world_hint=False)
 
@@ -316,6 +322,9 @@ def build_server() -> MCPServer:
             "spelling and arity, and MD dispatches its overloads on arity. Lengths are "
             "millimetres and there is no undo. MD must be open with the bridge "
             "started (Plugin tab > Start MCP).\n"
+            "To build, md_draft_piece drafts a piece from named edges and md_sew sews "
+            "two of them by name ('front.side'), saying which ends meet; both check "
+            "what MD built. The raw calls stay available for everything else.\n"
             "MD fails quietly more often than it fails loudly, so read the scene back "
             "rather than trusting a return value. Three that were measured on "
             "2026.0.315: utility_api.Simulate(n) runs n solver steps and returns True "
@@ -582,8 +591,11 @@ def build_server() -> MCPServer:
             )
         meta: dict[str, Any] = {
             "view": view,
-            "facing": CAMERA_VIEWS.get(view, "wherever the camera already was"),
-            "camera": (
+            "facing": (
+                "the 2D pattern: every piece's outline, as laid out on the board"
+                if view == "pattern" else
+                CAMERA_VIEWS.get(view, "wherever the camera already was")),
+            "camera": "not moved: the pattern is drawn whole" if view == "pattern" else (
                 f"moved to view {view} and left there: MD cannot read the camera "
                 "back, so the previous view was not restored"
                 if shot.get("camera_moved")
@@ -614,8 +626,9 @@ def build_server() -> MCPServer:
         view: int | None = None,
         max_size: int | None = SNAPSHOT_MAX_SIZE,
         views: list[int] | None = None,
+        pattern: bool = False,
     ) -> list[Image | dict]:
-        """Look at MD's 3D window: snapshots, returned as images.
+        """Look at MD's 3D window, or its 2D pattern: snapshots, returned as images.
 
         view: a camera position, 0 to 9, set with SetCamViewPoint. Measured on
             2026.0.315: 0 bottom, 1 three-quarter right, 2 front, 3 three-quarter left,
@@ -628,6 +641,10 @@ def build_server() -> MCPServer:
         max_size: the longest edge of each image in pixels, default 1024, so they stay
             cheap to keep in the conversation; 512 is plenty for three views. 0 sends
             them at full size.
+        pattern: also (or only, with no view) a picture of the 2D pattern -- every
+            piece's outline, whole, as laid out on the board. The quickest way to judge
+            a draft's proportions: a sleeve as wide as a back panel is visible at once.
+            Thin grey lines, so keep max_size at 1024 or more.
 
         THE CAMERA IS LEFT WHERE THIS PUT IT. MD has no call that reads the camera back
         (GetViewPoint answers -1 whatever is set), so the previous view cannot be
@@ -636,7 +653,8 @@ def build_server() -> MCPServer:
         """
         if view is not None and views:
             raise ValueError("give view or views, not both")
-        wanted: list[int | None] = list(views) if views else [view]
+        wanted: list[int | str | None] = list(views) if views else (
+            [] if pattern and view is None else [view])
         for one in wanted:
             if one is not None and one not in CAMERA_VIEWS:
                 raise ValueError(
@@ -645,6 +663,8 @@ def build_server() -> MCPServer:
                 )
         if max_size is not None and max_size < 0:
             raise ValueError(f"max_size cannot be negative, not {max_size!r}")
+        if pattern:
+            wanted.append("pattern")
         pictures = [_picture(data, shot, max_size) for data, shot in bridge.snapshots(wanted)]
         if len(pictures) == 1:
             meta, image = pictures[0]
@@ -851,6 +871,660 @@ def build_server() -> MCPServer:
         while len(ledgers) > 20:
             ledgers.pop(next(iter(ledgers)))
         return result
+
+    def _pieces_by_name(found: dict) -> dict[str, dict]:
+        """The board's pieces by name, with the detail md_sew resolves edges against."""
+        named: dict[str, dict] = {}
+        for piece in found["pieces"]:
+            entry = named.setdefault(piece["name"], {"index": piece["index"], "count": 0})
+            entry["count"] += 1
+            if "input" in piece:
+                read = drafting.parse_input_information(piece["input"])
+                entry["points"], entry["lengths"] = read["points"], read["lengths"]
+        return named
+
+    @server.tool(annotations=BUILDS)
+    @_reportable
+    def md_draft_piece(
+        name: str, outline: list[dict], at: list[float] | None = None,
+        gap_mm: float = drafting.DEFAULT_GAP_MM,
+    ) -> dict:
+        """Draft one pattern piece from named edges, check MD built it, and remember them.
+
+        Give the piece's corners in order. Each corner starts an edge that runs to the
+        next corner (the last runs back to the first), and names it:
+            {"at": [x, y], "edge": "hem"}
+            {"at": [x, y], "edge": "armhole", "through": [[x, y], ...]}
+        "through" lists the curve points of that edge; MD draws a smooth spline through
+        them. Millimetres, x right, y up. Do not repeat the first corner at the end:
+        MD closes the outline itself.
+
+        Edge i is MD's line i, because an MD line runs from one corner to the next
+        whatever curve points lie between. So any point sewn to two different
+        counterparts -- a sleeve cap's top, a shoulder's end -- must be a corner.
+
+        Refused before MD sees it: a repeated closing point, two points in one place, an
+        outline that crosses itself, a duplicate edge name, a name already in the scene.
+
+        at: where the piece's bottom-left goes on the 2D board. Default: gap_mm to the
+            right of every piece already there, so nothing overlaps on the board.
+
+        After creating the piece it reads MD's corners and line lengths back. If they
+        are not the planned edges, the reply says so and no edge names are stored (the
+        piece stays; delete it with DeletePatternPiece). Otherwise the edge names are
+        kept in the garment's own metadata, where md_sew finds them.
+
+        Returns index, name, edges [{name, line, start, end, curved,
+        predicted_length_mm, md_length_mm}], bbox, area_mm2, winding, warnings,
+        edges_stored. The piece is flat on the 2D board; nothing places it in 3D.
+        """
+        drafted = drafting.plan(name, outline)
+        found = bridge.board()
+        boxes = [
+            {**drafting.board_box(piece["center"], piece["size"]), "name": piece["name"]}
+            for piece in found["pieces"]
+            if "center" in piece
+        ]
+        if any(piece["name"] == drafted["name"] for piece in found["pieces"]):
+            raise ValueError(
+                f"a piece named {drafted['name']!r} already exists. Names are how md_sew "
+                "finds pieces, so they must be unique"
+            )
+        placed, warnings = drafting.lay_out(drafted, boxes, at=at, gap=gap_mm)
+
+        made = bridge.draft(placed["name"], placed["points"], found["count"])
+        if made.get("error"):
+            raise bridge.BridgeError(made["error"])
+        read_back = drafting.parse_input_information(made["input"])
+        errors, length_warnings, md_lengths = drafting.verify(placed, read_back)
+        warnings += length_warnings
+        if made.get("name_read_back") != placed["name"]:
+            errors.append(
+                f"the piece was named {placed['name']!r} and MD reads it back as "
+                f"{made.get('name_read_back')!r}"
+            )
+
+        edges = [
+            {**edge, "md_length_mm": round(md_lengths[edge["line"]], 2)}
+            if edge["line"] < len(md_lengths) else edge
+            for edge in placed["edges"]
+        ]
+        result = {
+            "index": made["index"],
+            "name": placed["name"],
+            "edges": edges,
+            "bbox": placed["bbox"],
+            "area_mm2": placed["area_mm2"],
+            "winding": placed["winding"],
+            "warnings": warnings,
+        }
+        if errors:
+            result["errors"] = errors
+            result["edges_stored"] = False
+            result["next"] = (
+                "MD did not build the planned edges, so edge names are not stored and "
+                "md_sew cannot use them for this piece. Inspect it, then delete it with "
+                f"pattern_api.DeletePatternPiece({made['index']}) or sew by line number."
+            )
+            return result
+
+        store = drafting.load_store(found.get("store") or "")
+        store["pieces"] = {
+            key: value for key, value in store["pieces"].items()
+            if key in {piece["name"] for piece in found["pieces"]}
+        }
+        store["pieces"][placed["name"]] = drafting.store_entry(placed, md_lengths)
+        stored = bridge.store_edges(json.dumps(store, sort_keys=True))
+        result["edges_stored"] = bool(stored.get("read_back_matches"))
+        if not result["edges_stored"]:
+            result["warnings"].append(
+                "MD did not keep the edge names (the garment metadata read back "
+                "without them), so md_sew needs line numbers for this piece"
+            )
+        return result
+
+    @server.tool(annotations=BUILDS)
+    @_reportable
+    def md_sew(
+        a: str, b: str, ends: str,
+        max_difference_mm: float = sewing.DEFAULT_MAX_DIFFERENCE_MM,
+        allow_layered: bool = False,
+    ) -> dict:
+        """Sew one edge to another by name, and confirm MD made exactly that seam.
+
+        a, b: "piece.edge", where edge is a name from md_draft_piece or a line number
+            ("front.side", "back.2").
+        ends: which ends meet, and there is no default. "same": the start of a meets
+            the start of b. "opposite": the start of a meets the end of b. An edge
+            starts at the corner it was drafted from and ends at the next. The wrong
+            choice builds a twisted seam that MD accepts and measures as correct.
+        max_difference_mm: the most the two edges' lengths may differ (default 5, MD's
+            own Check Sewing Length threshold). Raise it to sew deliberate ease.
+        allow_layered: sew an edge that is already sewn. Off by default, because an
+            edge sewn twice is usually a mistake rather than a lining.
+
+        Refused before MD is touched: an edge sewn to itself (MD would stop on a modal
+        dialog), an edge already sewn, a length difference over the limit, a stored
+        edge map that no longer fits its piece. After sewing it reads the seam ledger
+        back and checks that exactly one new seam joins exactly these two edges.
+
+        Returns planned (both sides with their pieces, lines, lengths and spans, and the
+        direction flags), returned (MD's bool), ok, added and problems. MD's API has no
+        call that removes a seam: if ok is false, md_restore is the way back.
+        """
+        planned_refs = [sewing.parse_ref(a)[0], sewing.parse_ref(b)[0]]
+        found = bridge.board(detail=planned_refs)
+        pieces = _pieces_by_name(found)
+        store = drafting.load_store(found.get("store") or "")
+        side_a = sewing.resolve(a, pieces, store)
+        side_b = sewing.resolve(b, pieces, store)
+        before = seams.ledger(bridge.seams(), max_groups=10**9)
+        planned = sewing.plan(
+            side_a, side_b, ends, before,
+            max_difference_mm=max_difference_mm, allow_layered=allow_layered,
+        )
+
+        sewn = bridge.sew(planned["args"], found["count"], found["seam_group_count"])
+        if sewn.get("error"):
+            raise bridge.BridgeError(sewn["error"])
+        result: dict[str, Any] = {"planned": planned, "returned": sewn.get("returned")}
+        for key in ("dialogs", "dialog_warning"):
+            if sewn.get(key):
+                result[key] = sewn[key]
+        if sewn.get("returned") is False:
+            result.update(ok=False, problems=[
+                "AddSeamlinePairGroup returned False, which it does for an index that "
+                "does not exist; nothing should have been made"])
+            return result
+        after = seams.ledger(bridge.seams(), max_groups=10**9)
+        result.update(sewing.confirm(planned, before, after))
+        result["fingerprint"] = after["fingerprint"]
+        ledgers[after["fingerprint"]] = after
+        return result
+
+    def _read_meshes(avatar: bool = True, garment: bool = True):
+        """MD's avatar and garment meshes, parsed, and its pieces; files cleaned up."""
+        import shutil
+
+        folder = tempfile.mkdtemp(prefix="md-mcp-meshes-")
+        try:
+            found = bridge.meshes(folder, avatar=avatar, garment=garment)
+            files = found.get("files", {})
+            if avatar and not files.get("avatar"):
+                raise bridge.BridgeError("MD wrote no avatar OBJ; is an avatar loaded?")
+            avatar_mesh = geometry.read_obj(files["avatar"]) if files.get("avatar") else None
+            garment_mesh = (
+                geometry.read_obj(files["garment"]) if files.get("garment") else None
+            )
+            if files.get("pattern"):
+                with open(files["pattern"], encoding="utf-8") as handle:
+                    found["outlines"] = fit.outline_lines(json.load(handle))
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+        return avatar_mesh, garment_mesh, found
+
+    @server.tool(annotations=READS)
+    @_reportable
+    def md_body(heights: list[float] | None = None) -> dict:
+        """The avatar's measurements, found from its mesh: what to draft a pattern to.
+
+        Landmark heights -- crotch, armpit, waist, hip, bust -- and the torso's girth at
+        each, read from exact horizontal sections of the avatar MD exports. A girth is
+        what a tape measure reads: the perimeter of the section's convex hull, so the
+        hollow between the breasts is bridged as a tape bridges it. The waist is the
+        narrowest torso section between crotch and armpit, the hip the widest below it,
+        the bust the widest above it.
+
+        heights: extra heights in mm to section at. Each lists every closed loop there
+            -- torso, arms, legs -- with its girth, x and z range and centre.
+
+        Millimetres, Y up, +Z the avatar's front, +X the avatar's left. The scene is not
+        changed. Expects a standing avatar centred on x = 0, as MD's are.
+        """
+        avatar, _, found = _read_meshes(avatar=True, garment=False)
+        result: dict[str, Any] = {"avatars": found.get("avatars", [])}
+        result.update(geometry.body_landmarks(avatar))
+        if heights:
+            slicer = geometry.Slicer(avatar)
+            sections = []
+            for h in heights:
+                loops = [loop for loop in slicer.loops(float(h)) if loop.closed]
+                sections.append({"height": h, "loops": [
+                    {"girth": round(loop.girth, 1),
+                     "x": [round(v, 1) for v in loop.x_range],
+                     "z": [round(v, 1) for v in loop.z_range],
+                     "centre": [round(v, 1) for v in loop.centre]}
+                    for loop in sorted(loops, key=lambda loop: loop.centre[0])]})
+            result["sections"] = sections
+        return result
+
+    @server.tool(annotations=READS)
+    @_reportable
+    def md_fit(
+        rings: dict[str, list[str]] | None = None, draped: bool = False, body: bool = True,
+        gaps: dict[str, list[str]] | None = None,
+    ) -> dict:
+        """Check the garment in 3D against its seams and the body -- before or after a drape.
+
+        Seams: every seam in MD's ledger, each side found in 3D and compared point for
+        point in the order the seam joins them. Before simulating, the gap is expected;
+        "paths_through_cloth" and "paths_through_body" count straight paths between
+        partners that run through a panel or the avatar -- edges that may start crossed.
+        Through the torso, alongside cloth inside the body, that caught a skirt side
+        seam open 100 mm; round an arm it is common and T-shirt side seams closed anyway
+        (both measured 2026-10-12). It also flags partners that would sit far closer
+        paired the other way round: wrong ends, or a piece arranged mirrored. After simulating, "open_mm" is seam length whose
+        partners are still more than 10 mm apart: a seam that did not close.
+
+        Pieces: each piece's height range, centroid, vertices inside the body and how
+        deep (and where), mesh edges the body passes through, and clearance from the
+        body (median and spread, mm). The edge test catches what the vertex test cannot:
+        trousers with straight legs on an A-posed avatar showed 1-2 vertices inside,
+        while the shins had left the trouser legs below the knee -- 8 edges per panel
+        crossed the body there (measured 2026-10-12). Contact under 2 mm is noise.
+
+        rings: openings and lines that go round the body, by name: {"waist":
+            ["front.waist", "back.waist"]}. Each reports its 3D length, the height it
+            sits at, the body's torso girth there, and the ease -- length minus girth.
+            Negative ease is cloth stretched over the body.
+        draped: say True after simulating. Then seam partners still more than 10 mm
+            apart are a problem -- the seam did not close; before a drape they are
+            expected and only the paths between them matter.
+        body: compare with the avatar (default). False skips the body tests.
+        gaps: pairs of edges left unsewn, by name: {"front": ["front_L.cf",
+            "front_R.cf"]}. Each reports how far apart they hang, overall and top to
+            bottom -- how open an open front is, measured rather than judged by eye.
+
+        Each piece also reports pattern_axes: which way its 2D +x and +y run on the body
+        and whether its drafted face looks away from it -- measured, which is how to
+        tell a seam's ends from the pieces as they sit.
+
+        Returns seams, pieces, rings, pieces_crossing, problems and warnings. Problems:
+        cloth inside the body, pieces passing through each other, seams still open after
+        a drape, a piece whose edges could not be located.
+        Warnings are risks to look at: a T-shirt whose side-seam paths crossed an arm
+        still closed in the drape (measured), while a skirt with 513 vertices starting
+        inside the hips caught a seam open. The scene is not changed.
+        """
+        avatar, garment, found = _read_meshes(avatar=body, garment=True)
+        if garment is None:
+            raise ValueError("there is no garment to check: MD exported no pattern pieces")
+        shape = {}
+        pieces_named = {}
+        outlines = found.get("outlines", {})
+        unregistered = []
+        for piece in found["pieces"]:
+            read = drafting.parse_input_information(piece["input"])
+            shape[piece["name"]] = {"index": piece["index"], "count": 1,
+                                    "points": read["points"], "lengths": read["lengths"]}
+            lines = outlines.get(piece["name"])
+            if not lines or len(lines) != len(read["lengths"]):
+                unregistered.append(piece["name"])
+                continue
+            try:
+                pieces_named[piece["name"]] = fit.PieceMap(
+                    garment, piece["name"], lines, read["lengths"])
+            except KeyError:
+                continue
+        body_model = geometry.Body(avatar) if avatar is not None else None
+        body_index = (
+            geometry.TriangleIndex(avatar.vertices, avatar.triangles())
+            if avatar is not None else None
+        )
+        garment_index = geometry.TriangleIndex(garment.vertices, garment.triangles())
+        ledger = seams.ledger(bridge.seams(), max_groups=10**9)
+
+        store = drafting.load_store(bridge.board().get("store") or "")
+        # Edge names label the report only where the stored map still has the piece's
+        # line count; a reshaped piece is reported by line number.
+        names = {
+            piece: {line: edge for edge, line in entry.get("edges", {}).items()}
+            for piece, entry in store["pieces"].items()
+            if piece in shape and len(entry.get("lengths_mm", [])) == len(shape[piece]["lengths"])
+        }
+        result: dict[str, Any] = {
+            "seams": fit.seam_report(pieces_named, ledger, garment_index, body_index,
+                                     garment.vertices, names),
+            "pieces": {name: fit.piece_report(p, body_model, body_index)
+                       for name, p in pieces_named.items()},
+        }
+        ring_reports = {}
+        for ring_name, refs in (rings or {}).items():
+            edges = []
+            for ref in refs:
+                side = sewing.resolve(ref, shape, store)
+                edges.append((side["piece"], side["line"]))
+            ring_reports[ring_name] = fit.ring_report(ring_name, edges, pieces_named,
+                                                      body_model, names)
+        result["rings"] = ring_reports
+        gap_reports = {}
+        for gap_name, refs in (gaps or {}).items():
+            if len(refs) != 2:
+                raise ValueError(f"gap {gap_name!r} needs exactly two edges, got {len(refs)}")
+            sides = [sewing.resolve(ref, shape, store) for ref in refs]
+            for side in sides:
+                if side["piece"] not in pieces_named:
+                    raise ValueError(f"gap {gap_name!r}: {side['piece']!r} was not found in 3D")
+            gap_reports[gap_name] = fit.gap_report(
+                (sides[0]["piece"], sides[0]["line"]), (sides[1]["piece"], sides[1]["line"]),
+                pieces_named, names)
+        if gap_reports:
+            result["gaps"] = gap_reports
+        warnings = [f"{s['group']} ({s['seam']}): {w}"
+                    for s in result["seams"] for w in s.get("warnings", [])]
+        for ring_name, ring in ring_reports.items():
+            if draped and (ring.get("stretch_pct") or 0) > fit.RING_STRETCH_PCT:
+                warnings.append(
+                    f"ring {ring_name}: {ring['stretch_pct']} % longer than drafted -- it is "
+                    "carrying the garment, squeezed round the body, or a knit hanging by "
+                    "its own weight. Measured 2026-10-12: an armhole with no ease over the "
+                    "arm root (12 %, the arm through the sleeve) and plain waists that slid "
+                    "onto the hips (10-17 %) -- draft longer, or hold a waist with elastic; "
+                    "jersey armholes with 100 mm of ease, 5-8 %")
+            if ring.get("drafted_ease_mm", 0) < 0:
+                warnings.append(
+                    f"ring {ring_name}: drafted {ring['drafted_mm']} mm round "
+                    f"{ring['body_girth_mm']} mm of body in its own plane, so it can only "
+                    "sit there stretched or move until it fits -- intended for an "
+                    "elastic waist, otherwise draft it longer")
+        problems = [
+            f"{name}: not checked -- its outline in MD's pattern document does not match "
+            "its lines (a duplicate name, or an export without it)" for name in unregistered]
+        for name, p in result["pieces"].items():
+            if p.get("registration_residual_mm", 0) > 2.0:
+                problems.append(
+                    f"{name}: its corners fit its 3D outline only to "
+                    f"{p['registration_residual_mm']} mm, so its edges may be misplaced "
+                    "in this report")
+        for s in result["seams"] if draped else []:
+            if s.get("open_mm", 0) > 0:
+                problems.append(f"{s['group']} ({s['seam']}): {s['open_mm']} mm of seam has partners "
+                                "more than 10 mm apart after the drape: it did not close")
+        result["pieces_crossing"] = fit.pieces_crossing(garment, sorted(pieces_named))
+        for crossing in result["pieces_crossing"]:
+            a, b = crossing["pieces"]
+            problems.append(
+                f"{a} and {b} pass through each other -- {crossing['edges']} mesh edges, "
+                f"heights {crossing['y'][0]} to {crossing['y'][1]} mm: the solver pushes "
+                "one out, and an arranged pair has been measured flung round to the side "
+                "seam. Move one with md_place's around or clearance_mm before simulating")
+        for name, p in result["pieces"].items():
+            if p.get("edges_through_body"):
+                problems.append(
+                    f"{name}: the body passes through the cloth -- {p['edges_through_body']}"
+                    f" mesh edges cross its surface, between heights "
+                    f"{p['through_body_y'][0]} and {p['through_body_y'][1]} mm")
+            elif p.get("deepest_inside_mm", 0) > fit.INSIDE_TOLERANCE_MM:
+                problems.append(f"{name}: {p['inside_body']} vertices inside the body, up "
+                                f"to {p['deepest_inside_mm']} mm deep")
+        result["problems"] = problems
+        result["warnings"] = warnings
+        return result
+
+    @server.tool(annotations=TOUCHES)
+    @_reportable
+    def md_place(
+        piece: str,
+        point: str,
+        height_mm: float | None = None,
+        anchor: str = "center",
+        clearance_mm: float = 20.0,
+        around: int | None = None,
+        style: str = "Flat",
+        orientation: int | None = None,
+    ) -> dict:
+        """Arrange a piece on the body and steer it until it sits where it is meant to.
+
+        MD has no call that moves a piece freely in 3D. What it has is an arrangement
+        point, which receives the centre of the piece's 2D box, and three values on the
+        point's bounding volume -- round it (x), along it (y), out from it (offset),
+        0-100 each. Measured on Genesis 8 with MD's Adult V2 points (2026-10-12): y ran
+        a piece's centre from 888 to 1467 mm, offset 2 mm a unit out from the body, and
+        x round it (50 the front centre, 25 the avatar's left, 0 and 100 the back). The
+        units are the volume's, so this does not predict: it sets values, exports the
+        piece, measures where it landed, and corrects -- a bounded integer search, the
+        same answer every time for the same scene.
+
+        piece: the piece's name.
+        point: an arrangement point, its exact name or a part of one that matches only
+            one ("Body_Front_Center_5"). It chooses the bounding volume and the defaults.
+            Points' names are not positions -- md_arrangement_points shows where they
+            land.
+        height_mm: where the anchor should sit, in mm above the floor. Omit to keep the
+            point's own height.
+        anchor: "center" (the piece's middle) or one of its edges, by name or line
+            number -- "waist" puts the waist edge's average height at height_mm.
+        clearance_mm: the least distance between the piece and the body (default 20).
+            The offset is raised until the nearest vertex is at least this far out, and
+            no further than needed.
+        around: the x value, 0-100, overriding the point's own -- to move a piece round
+            the body. Omit to keep the point's.
+        style: "Flat" (default) or "Curved". Curved wraps the piece round the volume;
+            measured on a skirt, it started the side edges inside the hips and crossed,
+            and the side seam caught open in the drape. Flat pieces arrive as planes,
+            which the seams then pull round the body.
+        orientation: degrees; default the point's own (180 on every measured point).
+
+        Pieces already placed with md_place are kept clear of: the offset also rises until
+        this piece passes through none of them (through_pieces names any it still does).
+
+        Returns the point, the values chosen, the anchor height and clearance achieved,
+        vertices inside the body, the piece's pattern axes in 3D, and every try. Check
+        the whole garment with md_fit before simulating.
+        """
+        if style not in ("Flat", "Curved"):
+            raise ValueError("style must be 'Flat' or 'Curved', the two MD accepts")
+        listed = bridge.arrangement_list()
+        names = [p.get("ArrangementName", "") for p in listed]
+        hits = [i for i, n in enumerate(names) if n == point] or [
+            i for i, n in enumerate(names) if point.lower() in n.lower()]
+        if not names:
+            raise ValueError(
+                "the avatar has no arrangement points. MD ships them: import_api.ImportFile "
+                "the Adult_V2_Arrangement_Bounding_Volume.pan and then "
+                "Adult_V2_Arrangement_Point.arr from Preset/Avatar/Arrangement -- measured "
+                "to give Genesis 8 109 points")
+        if len(hits) != 1:
+            raise ValueError(
+                f"{point!r} matches {len(hits)} arrangement points"
+                + (f": {[names[i] for i in hits][:12]}" if hits else
+                   f"; some are {names[:12]}"))
+        entry = listed[hits[0]]
+
+        def value(key: str, default: int) -> int:
+            try:
+                return int(float(entry.get(key, default)))
+            except (TypeError, ValueError):
+                return default
+
+        x = around if around is not None else value("ArrangementOffsetX", 50)
+        y = value("ArrangementOffsetY", 50)
+        offset = value("ArrangementOffsetZ", 50)
+        turn = orientation if orientation is not None else value("ArrangementOrientation", 180)
+        for label, number in (("around", x),):
+            if not 0 <= number <= 100:
+                raise ValueError(f"{label} must be 0-100, not {number}")
+
+        found = bridge.board(detail=[piece])
+        pieces = _pieces_by_name(found)
+        if piece not in pieces:
+            raise ValueError(f"no piece is named {piece!r}")
+        if pieces[piece]["count"] > 1:
+            raise ValueError(f"{pieces[piece]['count']} pieces are named {piece!r}")
+        index = pieces[piece]["index"]
+        store = drafting.load_store(found.get("store") or "")
+        anchor_line = None
+        if anchor != "center":
+            anchor_line = sewing.resolve(f"{piece}.{anchor}", pieces, store)["line"]
+        # Pieces md_place has already put on the body: this one must not pass through
+        # them. Pieces not yet arranged sit wherever MD drafted them and are ignored.
+        placed = sorted(name for name, entry in store["pieces"].items()
+                        if entry.get("placed") and name != piece and name in pieces)
+
+        avatar, _, _ = _read_meshes(avatar=True, garment=False)
+        body_model = geometry.Body(avatar)
+        tries: list[dict] = []
+
+        def measure(values: list[int]) -> dict:
+            bridge.arrange(index, piece, turn, values=values)
+            _, garment, meta = _read_meshes(avatar=False, garment=True)
+            info = next(p for p in meta["pieces"] if p["name"] == piece)
+            read = drafting.parse_input_information(info["input"])
+            mapped = fit.PieceMap(garment, piece, meta["outlines"][piece], read["lengths"])
+            pts = [mapped.piece.vertices[v] for v in mapped.vertex_ids()]
+            if anchor_line is None:
+                ys = [p[1] for p in pts]
+                height = (min(ys) + max(ys)) / 2.0
+            else:
+                line = mapped.line_points(anchor_line)
+                height = sum(p[1] for p in line) / len(line)
+            clearances = [c for c in (body_model.clearance(p) for p in pts) if c is not None]
+            crossing = {}
+            for crossed in fit.pieces_crossing(garment, [piece] + placed):
+                if piece in crossed["pieces"]:
+                    other = next(n for n in crossed["pieces"] if n != piece)
+                    crossing[other] = crossed["edges"]
+            state = {
+                "values": list(values),
+                "anchor_height_mm": round(height, 1),
+                "min_clearance_mm": round(min(clearances), 1) if clearances else None,
+                "inside_body": sum(1 for c in clearances if c < 0),
+                "through_pieces": crossing,
+                "axes": fit.pattern_axes(mapped),
+            }
+            tries.append({k: v for k, v in state.items() if k != "axes"})
+            return state
+
+        bridge.arrange(index, piece, turn, point=hits[0], style=style, values=[x, y, offset])
+        state = measure([x, y, offset])
+
+        def solve_height(state: dict) -> dict:
+            nonlocal y
+            if height_mm is None:
+                return state
+            low, high = measure([x, 0, offset]), measure([x, 100, offset])
+            span = high["anchor_height_mm"] - low["anchor_height_mm"]
+            if abs(span) < 1.0:
+                return state
+            guess = round((height_mm - low["anchor_height_mm"]) / span * 100)
+            y = max(0, min(100, guess))
+            state = measure([x, y, offset])
+            for _ in range(3):
+                error = height_mm - state["anchor_height_mm"]
+                step = round(error / span * 100)
+                if step == 0 or not 0 <= y + step <= 100:
+                    break
+                y += step
+                state = measure([x, y, offset])
+            return state
+
+        state = solve_height(state)
+
+        # The least offset whose nearest vertex clears the body by clearance_mm and whose
+        # cloth passes through no piece already placed -- two fronts with extensions
+        # arranged through each other end up layered, the second outside the first.
+        def clear_enough(s: dict) -> bool:
+            return (s["inside_body"] == 0 and (s["min_clearance_mm"] or 0) >= clearance_mm
+                    and not s["through_pieces"])
+
+        if not clear_enough(state):
+            low, high = offset, 100
+            top = measure([x, y, high])
+            if clear_enough(top):
+                while high - low > 1:
+                    middle = (low + high) // 2
+                    if clear_enough(measure([x, y, middle])):
+                        high = middle
+                    else:
+                        low = middle
+                offset = high
+            else:
+                offset = high
+        else:
+            low, high = 0, offset
+            while high - low > 1:
+                middle = (low + high) // 2
+                if clear_enough(measure([x, y, middle])):
+                    high = middle
+                else:
+                    low = middle
+            offset = high
+        state = measure([x, y, offset])
+        if height_mm is not None and abs(height_mm - state["anchor_height_mm"]) > 6:
+            state = solve_height(state)
+            state = measure([x, y, offset])
+
+        result: dict[str, Any] = {
+            "piece": piece,
+            "point": names[hits[0]],
+            "style": style,
+            "orientation": turn,
+            "values": {"around": x, "along": y, "offset": offset},
+            "anchor": anchor,
+            "anchor_height_mm": state["anchor_height_mm"],
+            "min_clearance_mm": state["min_clearance_mm"],
+            "inside_body": state["inside_body"],
+            "through_pieces": state["through_pieces"],
+            "pattern_axes": state["axes"],
+            "tries": tries,
+        }
+        problems = []
+        if height_mm is not None and abs(height_mm - state["anchor_height_mm"]) > 6:
+            problems.append(
+                f"the anchor sits at {state['anchor_height_mm']} mm, not {height_mm}: the "
+                "point's volume does not reach that height -- try a point nearer it")
+        if state["through_pieces"]:
+            problems.append(
+                f"the piece still passes through {sorted(state['through_pieces'])} at the "
+                "most offset: move it round the body with around, or place the other first")
+        elif not clear_enough(state):
+            problems.append(
+                f"the piece clears the body by {state['min_clearance_mm']} mm at most "
+                f"offset, with {state['inside_body']} vertices inside: try another point "
+                "or a smaller piece")
+        if piece in store["pieces"]:
+            store["pieces"][piece]["placed"] = names[hits[0]]
+            bridge.store_edges(json.dumps(store, sort_keys=True))
+        result["problems"] = problems
+        return result
+
+    @server.tool(annotations=READS)
+    @_reportable
+    def md_edges(piece: str = "") -> dict:
+        """The edge names md_draft_piece stored, checked against the pieces as they are.
+
+        piece: one piece's name; empty lists every piece with stored names.
+
+        Returns pieces: {name: {edges: {edge: line}, lengths_mm (MD's, now), valid, why}}.
+        A piece whose shape changed since it was drafted is marked not valid -- its line
+        numbers may have moved -- and md_sew refuses its edge names until it is drafted
+        again. The scene is not changed.
+        """
+        found = bridge.board()
+        store = drafting.load_store(found.get("store") or "")
+        wanted = [piece] if piece else sorted(store["pieces"])
+        detail = bridge.board(detail=wanted) if wanted else found
+        current = _pieces_by_name(detail)
+        listed = {}
+        for name in wanted:
+            entry = store["pieces"].get(name)
+            if entry is None:
+                listed[name] = {"valid": False, "why": "no edge names are stored for it"}
+                continue
+            now = current.get(name)
+            if now is None or "points" not in now:
+                listed[name] = {"edges": entry["edges"], "valid": False,
+                                "why": "no piece of that name is in the scene"}
+                continue
+            stale = drafting.still_matches(entry, now["points"])
+            listed[name] = {
+                "edges": entry["edges"],
+                "lengths_mm": [round(length, 2) for length in now["lengths"]],
+                "valid": stale is None and now["count"] == 1,
+                "why": stale or (None if now["count"] == 1 else
+                                 f"{now['count']} pieces share the name"),
+            }
+        return {"pieces": listed}
 
     return server
 

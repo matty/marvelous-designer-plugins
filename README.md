@@ -1,7 +1,8 @@
 # md-mcp
 
 An MCP server that gives a model the whole of a running Marvelous Designer's Python API —
-688 calls across six modules, none of them wrapped, curated or modelled.
+688 calls across six modules, none of them hidden — plus tools that build with it and
+check what MD did: drafting pieces from named edges, and sewing them by name.
 
 Windows only, since Marvelous Designer is. Tested against MD 2026.0.315.
 
@@ -11,6 +12,19 @@ There are two halves: the MCP server your client runs, and a plugin inside Marve
 Designer that it talks to. Both come from the
 [releases page](https://github.com/matty/marvelous-designer-plugins/releases) and must
 be the same version.
+
+### Claude Desktop
+
+Open `md-mcp-<version>.mcpb`, or drag it onto **Settings → Extensions**. It carries its
+own Python and a copy of the plugin, so nothing else needs installing. Then open MD and
+ask Claude for `md_status`. Until the plugin is running, it answers with two lines to
+paste once into MD's **Main Menu → Plugins → Python Editor** and **Run**. After that,
+**Start MCP** in MD's Plugin tab starts the bridge.
+
+The extension's settings take the bridge port (`MD_MCP_PORT`, default 5121; set the
+same variable for MD if you change it) and the checkpoint folder.
+
+### Any other MCP client
 
 **1. The server.** With Python 3.11 or newer:
 
@@ -62,11 +76,17 @@ for the plugin.
 | `run_md_python` | Run a script inside MD and get back what it printed. `timeout_seconds` overrides the 300s default |
 | `md_measure` | 3D bounds of the avatar and of each garment group, plus avatar slices at given heights, read from OBJ exports MD makes and deletes |
 | `md_arrangement_points` | Where arrangement points really are in 3D. **Temporarily adds one pattern piece**, arranges it at each point, and deletes it; reports the before/after piece count |
-| `md_snapshot` | Pictures of the 3D window, returned as images. `view` 0–9 moves the camera (2 front, 8 back, 4 and 6 the sides) and leaves it there; `views=[2, 4, 8]` gives front, side and back in one call; `max_size` caps each image's long edge, default 1024 px |
+| `md_snapshot` | Pictures of the 3D window, returned as images. `view` 0–9 moves the camera (2 front, 8 back, 4 and 6 the sides) and leaves it there; `views=[2, 4, 8]` gives front, side and back in one call; `max_size` caps each image's long edge, default 1024 px; `pattern=True` adds the 2D pattern |
 | `md_fabric_presets` | The `.zfab` files `AddFabric` needs, found beside the running MD and in Public and user Documents |
 | `md_seams` | What MD has actually sewn to what: each seam's pieces, spans and line numbers, warnings for an edge sewn twice or to itself, and what changed since an earlier read |
 | `md_checkpoint` | Save the garment to a checkpoint `.zpac`, with a record of what it held. Leaves MD's open project alone, which a `.zprj` save does not, and keeps MD asking to save before closing |
 | `md_restore` | Put a checkpoint's garment back (`latest`, a label, or a path), keeping the open avatar, and say whether it matches the record |
+| `md_draft_piece` | Draft a pattern piece from named edges: refuses outlines MD would build wrong, lays it out clear of the others on the 2D board, reads MD's corners and lengths back, and keeps the edge names in the garment |
+| `md_sew` | Sew two edges by name (`"front.side"`), saying which ends meet. Refuses an edge sewn to itself or already sewn and a length mismatch, then checks MD's ledger holds exactly that seam |
+| `md_edges` | The stored edge names, checked against each piece as it is now |
+| `md_body` | The avatar's measurements from its mesh: crotch, waist, hip, bust, armpit and neck-base heights and girths, front and back arcs, and the shoulder line |
+| `md_place` | Arrange a piece on the body and steer MD's arrangement values until an edge sits at a height and the piece clears the body by a margin, measured each try, and clear of pieces it placed before |
+| `md_fit` | The garment in 3D, before or after a drape: seams that will not or did not close, cloth inside the body, pieces through each other, rings (a waist, a neckline) with their length, stretch, height and ease against the body in their own plane, and gaps between unsewn edges |
 | `md_guide` | Short, measured facts about how MD behaves -- what its return values do not prove, how seams, placement and saving really work -- to read before changing anything |
 
 A modal dialog in MD holds the thread that serves the bridge. md-mcp watches for one from outside MD: a request blocked by a dialog gives up in about two seconds and says so, and `run_md_python`, `md_call` and `md_status` report a dialog left showing after a reply. It can name the dialog but not read its text, so look at MD.
@@ -164,9 +184,15 @@ python -m venv .venv
 .venv\Scripts\python.exe -m pytest                  # no MD needed
 .venv\Scripts\python.exe -m pytest -m md_required   # MD open; most need an empty scene
 python tools\build_plugin.py                        # dist/md-mcp-plugin-<version>.zip
+python tools\build_mcpb.py                          # dist/md-mcp-<version>.mcpb
 ```
+
+`build_mcpb.py` downloads CPython's Windows embeddable build and the wheels pinned in
+`packaging/mcpb/requirements.txt`, checks both against their hashes, and then starts the
+finished bundle and lists its tools. After changing pyproject's dependencies, run it
+once with `--relock`.
 
 The first set runs the shipped listener against fake MD modules, which proves the
 protocol and nothing about Marvelous Designer. The second needs MD open with the bridge
 started; it calls `NewProject`, so it refuses to run against a scene with anything in it.
-A `v*` tag publishes the plugin zip and the wheel. [AGENTS.md](AGENTS.md) has the rest.
+A `v*` tag publishes the `.mcpb`, the plugin zip and the wheel. [AGENTS.md](AGENTS.md) has the rest.

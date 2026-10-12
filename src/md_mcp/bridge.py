@@ -44,7 +44,25 @@ class BridgeError(RuntimeError):
 
 
 def port() -> int:
-    return int(os.environ.get(PORT_ENV, DEFAULT_PORT))
+    """The port from MD_MCP_PORT, or 5121 when it is unset or empty.
+
+    An MCPB host fills MD_MCP_PORT from a number field, which can arrive as "5121.0";
+    anything that is not a whole number in range is refused by name rather than
+    turned into a connection error about some other port.
+    """
+    raw = os.environ.get(PORT_ENV, "").strip()
+    if not raw:
+        return DEFAULT_PORT
+    try:
+        value = float(raw)
+    except ValueError:
+        value = 0.0
+    if not value.is_integer() or not 0 < value < 65536:
+        raise BridgeError(
+            f"{PORT_ENV} is {raw!r}, which is not a port. Set it to a whole number from "
+            f"1 to 65535 -- the same one in MD's environment -- or unset it for {DEFAULT_PORT}."
+        )
+    return int(value)
 
 
 def _listener_candidates():
@@ -52,7 +70,9 @@ def _listener_candidates():
 
     The checkout beats an install deliberately. Running md-mcp from a checkout means
     somebody is working on it, and pointing them at a copy installed weeks ago is how
-    an afternoon goes into a bug that was fixed in the file they are looking at.
+    an afternoon goes into a bug that was fixed in the file they are looking at. An
+    MCPB bundle carries the listener at the same place relative to this file, and it
+    wins for the same reason: it is the version this server was built with.
     """
     override = os.environ.get(PLUGIN_ENV)
     if override:
@@ -71,15 +91,35 @@ def listener_script() -> pathlib.Path | None:
     return None
 
 
+def paste_lines(script: pathlib.Path) -> str:
+    """The two lines that run ``script`` from MD's Python Editor.
+
+    Lines and not the file's contents: a pasted body has no ``__file__``, so it could
+    not register Start MCP and Stop MCP, and MD's editor keeps its own buffer, which
+    goes stale. ``compile`` with the real path puts that path in any traceback.
+    """
+    return (
+        f'path = r"{script}"\n'
+        'exec(compile(open(path, encoding="utf-8").read(), path, "exec"), '
+        '{"__file__": path, "__name__": "__main__"})'
+    )
+
+
 def how_to_connect() -> str:
     script = listener_script()
-    where = str(script) if script else "plugin/md_mcp_listener.py from the md-mcp repo"
+    first_time = (
+        "If there is no such entry yet, paste these two lines into Main Menu > Plugins "
+        f"> Python Editor and press Run:\n\n{paste_lines(script)}\n\nThat starts the "
+        "bridge and adds Start MCP and Stop MCP to the Plugin tab for next time."
+        if script
+        else "If there is no such entry yet, run plugin/md_mcp_listener.py from the "
+        "md-mcp repo via Main Menu > Plugins > Python Editor > Run, which starts it and "
+        "adds Start MCP and Stop MCP to the Plugin tab."
+    )
     return (
         f"No Marvelous Designer listener on {HOST}:{port()}. In MD, click 'Start MCP' "
         "in the Plugin tab (an older install calls it 'md-mcp'); it shows a message box "
-        "only if something went wrong. If there is no such entry yet, run "
-        f"{where} via Main Menu > Plugins > Python Editor > Run, which starts it and "
-        "adds Start MCP and Stop MCP to the Plugin tab. It serves until Stop MCP is "
+        f"only if something went wrong. {first_time} It serves until Stop MCP is "
         "clicked or MD closes. If MD shows an older md-mcp window instead, that listener "
         "predates Start MCP: press Start in it, or update the plugin."
     )
@@ -989,7 +1029,11 @@ print(json.dumps(_result))
 #: md_snapshot, inside MD. SetCamViewPoint(0..9) is the camera call that works --
 #: SetViewPoint is accepted and moves nothing -- and Refresh3DWindow goes between the
 #: move and ExportSnapshot3D (measured 2026-09-19 and 2026-10-11, 2026.0.315). Several
-#: views are taken in one run, so front, side and back cost one round trip. Each PNG
+#: views are taken in one run, so front, side and back cost one round trip. The view
+#: "pattern" is the 2D board instead: ExportSnapshot2D(path, 0) draws every piece's
+#: outline, whole, whatever the 2D window shows; mode 1 captured the window as zoomed,
+#: and both returned [] while writing the file. On an empty board it raises a modal
+#: "There are no patterns" instead, so that is refused here (measured 2026-10-12). Each PNG
 #: crosses the bridge as base64 inside the printed JSON, and the files are deleted.
 _SNAPSHOT = r'''
 import base64, json, os, shutil, tempfile
@@ -1012,13 +1056,23 @@ _folder = tempfile.mkdtemp(prefix="md-mcp-snapshot-")
 try:
     for _number, _view in enumerate(_params["views"]):
         _shot = {"view": _view, "camera_moved": False}
-        if _view is not None:
-            utility_api.SetCamViewPoint(_view)
-            _shot["camera_moved"] = True
-        if hasattr(utility_api, "Refresh3DWindow"):
-            utility_api.Refresh3DWindow()
         _path = os.path.join(_folder, "snapshot_{}.png".format(_number)).replace("\\", "/")
-        _returned = export_api.ExportSnapshot3D(_path)
+        if _view == "pattern":
+            import pattern_api
+            if not pattern_api.GetPatternCount():
+                # MD answers an empty board with a modal "There are no patterns",
+                # which holds the main thread -- and this bridge -- until clicked.
+                raise RuntimeError(
+                    "there are no pattern pieces to draw: MD answers ExportSnapshot2D "
+                    "on an empty board with a modal dialog, so it was not asked")
+            _returned = export_api.ExportSnapshot2D(_path, 0)
+        else:
+            if _view is not None:
+                utility_api.SetCamViewPoint(_view)
+                _shot["camera_moved"] = True
+            if hasattr(utility_api, "Refresh3DWindow"):
+                utility_api.Refresh3DWindow()
+            _returned = export_api.ExportSnapshot3D(_path)
         _found = None
         for _candidate in [_path] + _mdmcp_paths(_returned, []):
             if os.path.isfile(_candidate):
@@ -1274,6 +1328,202 @@ print(json.dumps(_result))
 '''
 
 
+#: md_draft_piece and md_sew read the 2D board through this, inside MD. Every piece's
+#: name and 2D box -- GetPatternPiecePos answers the box's centre and
+#: GetBoundingBoxOfPattern only its Width and Height, as strings (2026-10-12,
+#: 2026.0.315) -- and, for the pieces named in ``detail``, GetPatternInputInformation:
+#: a JSON string of the straight points and every line's length. Plus the edge maps
+#: md-mcp keeps under one key of the garment's own metadata, a JSON object.
+_BOARD = r'''
+import json
+import pattern_api, utility_api
+_params = json.loads(__MD_MCP_PARAMS__)
+_count = pattern_api.GetPatternCount()
+_pieces = []
+for _i in range(_count):
+    _entry = {"index": _i, "name": pattern_api.GetPatternPieceName(_i)}
+    try:
+        _entry["center"] = [float(v) for v in pattern_api.GetPatternPiecePos(_i)]
+        _entry["size"] = dict(pattern_api.GetBoundingBoxOfPattern(_i))
+    except Exception as _exc:
+        _entry["error"] = "{}: {}".format(type(_exc).__name__, _exc)
+    if _entry["name"] in _params["detail"]:
+        _entry["input"] = pattern_api.GetPatternInputInformation(_i)
+    _pieces.append(_entry)
+print(json.dumps({"count": _count,
+                  "seam_group_count": pattern_api.GetSeamlinePairGroupCount(),
+                  "pieces": _pieces,
+                  "store": json.loads(utility_api.GetMetaDataForCurrentGarment() or "{}")
+                  .get(_params["key"], "")}))
+'''
+
+#: md_draft_piece's one change to MD, made only if the scene is still the one the plan
+#: was laid out against. The new piece must come back as the last index and the count
+#: must rise by exactly one, or nothing else is done to any index: naming the wrong
+#: index would rename somebody's piece.
+_DRAFT = r'''
+import json
+import pattern_api
+_params = json.loads(__MD_MCP_PARAMS__)
+_count = pattern_api.GetPatternCount()
+_names = [pattern_api.GetPatternPieceName(_i) for _i in range(_count)]
+if _count != _params["expect_count"]:
+    _result = {"error": "the scene changed between reading the board and drafting: it "
+               "had {} pieces and now has {}; nothing was drafted".format(
+                   _params["expect_count"], _count)}
+elif _params["name"] in _names:
+    _result = {"error": "a piece named {!r} already exists; nothing was drafted".format(
+        _params["name"])}
+else:
+    _points = [(float(x), float(y), int(kind)) for x, y, kind in _params["points"]]
+    _index = pattern_api.CreatePatternWithPoints(_points)
+    _after = pattern_api.GetPatternCount()
+    _result = {"index": _index, "count_before": _count, "count_after": _after}
+    if _after != _count + 1 or _index != _count:
+        _result["error"] = ("CreatePatternWithPoints answered {!r} and the count went from "
+                            "{} to {}; the piece was not named, and nothing else was "
+                            "touched".format(_index, _count, _after))
+    else:
+        pattern_api.SetPatternPieceName(_index, _params["name"])
+        _result["name_read_back"] = pattern_api.GetPatternPieceName(_index)
+        _result["input"] = pattern_api.GetPatternInputInformation(_index)
+print(json.dumps(_result))
+'''
+
+#: Writes the edge maps into the garment's metadata and reads them straight back.
+#: Measured 2026-10-12 on 2026.0.315: ChangeMetaDataValueForCurrentGarment(key, value)
+#: adds or replaces one key of the garment's metadata object and leaves the others; the
+#: value survives ExportZPac and ImportZpac, so checkpoints carry it, and NewProject
+#: clears it. utility_api.SetAPIMetaData, the obvious candidate, returned False for
+#: every key tried and stored nothing. A map that cannot be read back is not stored.
+_STORE = r'''
+import json
+import utility_api
+_params = json.loads(__MD_MCP_PARAMS__)
+_ok = utility_api.ChangeMetaDataValueForCurrentGarment(_params["key"], _params["value"])
+_back = json.loads(utility_api.GetMetaDataForCurrentGarment() or "{}").get(_params["key"])
+print(json.dumps({"returned": _ok, "read_back_matches": _back == _params["value"]}))
+'''
+
+#: md_sew's one change to MD, guarded like _DRAFT: refused if the piece or seam count
+#: moved since the plan was made, because the plan's indices would no longer mean what
+#: they meant.
+_SEW = r'''
+import json
+import pattern_api
+_params = json.loads(__MD_MCP_PARAMS__)
+_count = pattern_api.GetPatternCount()
+_seams = pattern_api.GetSeamlinePairGroupCount()
+if _count != _params["expect_count"] or _seams != _params["expect_seams"]:
+    _result = {"error": "the scene changed since the seam was planned ({} pieces and {} "
+               "seam groups, planned against {} and {}); nothing was sewn".format(
+                   _count, _seams, _params["expect_count"], _params["expect_seams"])}
+else:
+    _a, _la, _b, _lb, _da, _db = _params["args"]
+    _returned = pattern_api.AddSeamlinePairGroup(
+        int(_a), int(_la), int(_b), int(_lb), bool(_da), bool(_db))
+    _result = {"returned": _returned,
+               "seam_group_count_after": pattern_api.GetSeamlinePairGroupCount()}
+print(json.dumps(_result))
+'''
+
+
+#: md_body and md_fit, inside MD: the avatar alone and the garment alone exported to
+#: OBJ into a folder md-mcp made, and for every piece its 2D box centre and the
+#: straight points and line lengths -- what maps the OBJ's per-vertex pattern positions
+#: (relative to that centre) back onto named edges. md-mcp reads the files itself: the
+#: bridge is loopback-only, so MD is always on this machine.
+_MESHES = r'''
+import json, os
+import pattern_api, export_api, ApiTypes
+_params = json.loads(__MD_MCP_PARAMS__)
+_result = {"files": {}}
+for _name, _avatar, _garment in (("avatar", True, False), ("garment", False, True)):
+    if not _params[_name]:
+        continue
+    _option = ApiTypes.ImportExportOption()
+    _option.bExportAvatar = _avatar
+    _option.bExportGarment = _garment
+    _path = os.path.join(_params["folder"], _name + ".obj").replace("\\", "/")
+    export_api.ExportOBJ(_path, _option)
+    _result["files"][_name] = _path if os.path.isfile(_path) else None
+_pieces = []
+for _i in range(pattern_api.GetPatternCount()):
+    _pieces.append({"index": _i, "name": pattern_api.GetPatternPieceName(_i),
+                    "center": [float(v) for v in pattern_api.GetPatternPiecePos(_i)],
+                    "input": pattern_api.GetPatternInputInformation(_i)})
+_result["pieces"] = _pieces
+_result["avatars"] = list(export_api.GetAvatarNameList())
+if _params["garment"] and _pieces:
+    _path = os.path.join(_params["folder"], "pattern.json").replace("\\", "/")
+    pattern_api.ExportPatternJSON(_path)
+    _result["files"]["pattern"] = _path if os.path.isfile(_path) else None
+print(json.dumps(_result))
+'''
+
+
+#: md_place's one lever, inside MD. Measured 2026-10-12 on 2026.0.315 with Genesis 8
+#: and the Adult V2 arrangement files: SetArrangementPosition's three values are
+#: absolute coordinates on the point's bounding volume -- Body_Front_Center_5 and
+#: Body_Back_Center_5 put a piece in the same place for the same values -- and they
+#: take effect only when the piece is re-placed, which SetArrangementOrientation does.
+#: The piece must still be the one md-mcp resolved: guarded by name.
+_ARRANGE = r'''
+import json
+import pattern_api
+_params = json.loads(__MD_MCP_PARAMS__)
+_index = _params["index"]
+if pattern_api.GetPatternPieceName(_index) != _params["name"]:
+    _result = {"error": "piece {} is no longer named {!r}; nothing was arranged".format(
+        _index, _params["name"])}
+else:
+    if _params.get("point") is not None:
+        pattern_api.SetArrangement(_index, _params["point"])
+        pattern_api.SetArrangementShapeStyle(_index, _params["style"])
+    if _params.get("values") is not None:
+        _x, _y, _offset = _params["values"]
+        pattern_api.SetArrangementPosition(_index, int(_x), int(_y), int(_offset))
+    pattern_api.SetArrangementOrientation(_index, int(_params["orientation"]))
+    _result = {"arrangement": dict(pattern_api.GetArrangementOfPattern(_index))}
+print(json.dumps(_result))
+'''
+
+_POINTS = r'''
+import json
+import pattern_api
+print(json.dumps({"points": [dict(p) if isinstance(p, dict) else {"ArrangementName": str(p)}
+                             for p in pattern_api.GetArrangementList()]}))
+'''
+
+
+def arrangement_list() -> list[dict]:
+    """GetArrangementList, as dicts: names, default values, orientation, type."""
+    found, _ = _run_snippet(_POINTS, {}, "<md-mcp points>", QUERY_TIMEOUT)
+    return found["points"]
+
+
+def arrange(index: int, name: str, orientation: int, point: int | None = None,
+            style: str = "Flat", values: list[int] | None = None) -> dict:
+    """Arrange one piece; see ``_ARRANGE``."""
+    done, _ = _run_snippet(
+        _ARRANGE, {"index": index, "name": name, "point": point, "style": style,
+                   "values": values, "orientation": orientation},
+        "<md-mcp arrange>", QUERY_TIMEOUT,
+    )
+    if done.get("error"):
+        raise BridgeError(done["error"])
+    return done
+
+
+def meshes(folder: str, avatar: bool = True, garment: bool = True) -> dict:
+    """Have MD export the avatar and garment meshes into ``folder``; see ``_MESHES``."""
+    found, _ = _run_snippet(
+        _MESHES, {"folder": folder.replace("\\", "/"), "avatar": avatar, "garment": garment},
+        "<md-mcp meshes>", QUERY_TIMEOUT,
+    )
+    return found
+
+
 def _decode_printed(output: str) -> Any:
     """The JSON document a snippet printed -- its last line if something printed first."""
     try:
@@ -1290,12 +1540,56 @@ def _decode_printed(output: str) -> Any:
 
 
 def _run_snippet(
-    source: str, params: dict, name: str, timeout: float = RUN_TIMEOUT
+    source: str, params: dict, name: str, timeout: float = RUN_TIMEOUT,
+    look_after: bool = False,
 ) -> tuple[dict, dict]:
     """Run one of the snippets above with ``params``: what it printed, and the reply."""
     script = source.replace(_PARAMS, repr(json.dumps(params)))
-    reply = request("run", timeout=timeout, source=script, name=name)
+    reply = request("run", timeout=timeout, look_after=look_after, source=script, name=name)
     return _decode_printed(reply.get("output", "")), reply
+
+
+def board(detail: list[str] | None = None) -> dict:
+    """The 2D board: every piece's name and box, details for ``detail``, the edge maps."""
+    from md_mcp import drafting
+
+    found, _ = _run_snippet(
+        _BOARD, {"detail": list(detail or []), "key": drafting.METADATA_KEY},
+        "<md-mcp board>", QUERY_TIMEOUT,
+    )
+    return found
+
+
+def draft(name: str, points: list, expect_count: int) -> dict:
+    """Create one planned piece and name it; see ``_DRAFT`` for what is refused."""
+    made, _ = _run_snippet(
+        _DRAFT, {"name": name, "points": points, "expect_count": expect_count},
+        "<md-mcp draft>", QUERY_TIMEOUT, look_after=True,
+    )
+    return made
+
+
+def store_edges(value: str) -> dict:
+    """Write md-mcp's edge maps into the garment's metadata, and read them back."""
+    from md_mcp import drafting
+
+    stored, _ = _run_snippet(
+        _STORE, {"key": drafting.METADATA_KEY, "value": value},
+        "<md-mcp edge store>", QUERY_TIMEOUT,
+    )
+    return stored
+
+
+def sew(args: list, expect_count: int, expect_seams: int) -> dict:
+    """Make one planned seam, unless the scene moved since it was planned."""
+    sewn, reply = _run_snippet(
+        _SEW, {"args": args, "expect_count": expect_count, "expect_seams": expect_seams},
+        "<md-mcp sew>", QUERY_TIMEOUT, look_after=True,
+    )
+    for key in ("dialogs", "dialog_warning"):
+        if reply.get(key):
+            sewn[key] = reply[key]
+    return sewn
 
 
 def measure(
@@ -1347,8 +1641,9 @@ def arrangement_points(
     return resolved
 
 
-def snapshots(views: list[int | None]) -> list[tuple[bytes, dict]]:
-    """PNGs of MD's 3D window, one per view, taken in one run. None is "as it is"."""
+def snapshots(views: list[int | str | None]) -> list[tuple[bytes, dict]]:
+    """PNGs of MD's 3D window, one per view, taken in one run. None is "as it is", and
+    "pattern" the 2D pattern board."""
     taken, _ = _run_snippet(_SNAPSHOT, {"views": list(views)}, "<md-mcp snapshot>")
     result = []
     for shot in taken.get("shots", []):

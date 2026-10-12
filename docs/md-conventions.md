@@ -83,7 +83,9 @@ and shape checks; this is not a universal minimum.
 
 A chord-length-parameterized natural cubic spline reproduces MD's recorded lengths to
 better than 0.01 mm across these densities, if you need to predict a length before
-building.
+building. `md_draft_piece` predicts every edge this way and compares MD's figure after
+building: a 400 mm edge bulging 55 mm through three spline points was predicted at
+418.53 mm and measured 418.52 mm (2026-10-12, 2026.0.315).
 
 ### Moving a point
 
@@ -349,6 +351,22 @@ So `x` runs round the bounding volume, `y` along it, and the offset is distance 
 — about 2 mm a unit on this avatar. The units are the volume's, not millimetres, so read
 where the piece landed rather than predicting it.
 
+**The three values are coordinates on the volume, not offsets from the point.** Measured
+2026-10-12 on 2026.0.315 with Genesis 8 Female and MD's Adult V2 points (see below): a
+300 mm square arranged at `Body_Front_Center_5` and at `Body_Back_Center_5` landed in
+the same place for the same values — the point only supplies the defaults
+(`ArrangementOffsetX/Y/Z` in its `GetArrangementList()` entry, 50/15/50 and 0/15/50
+there). On the body volume, centre of the piece (mm):
+
+| Value | 0 | 25 | 50 | 100 |
+| --- | --- | --- | --- | --- |
+| `x` (round) | back centre, z −173 | avatar's left side, x +178 | front centre, z +127 | back centre |
+| `y` (along) | y 888 | | y 1178 | y 1467 |
+| offset (out) | z 27 — inside the body | | z 127 | z 227 |
+
+About 5.8 mm a unit along and exactly 2 mm a unit out. That makes placement a search over
+three bounded integers with a measurable result, which is what `md_place` does.
+
 `SetArrangementOrientation`'s `_orientation` is **degrees**, and the default is 180, not
 0. `SetArrangementShapeStyle` accepts only `"Flat"` and `"Curved"`.
 
@@ -363,14 +381,23 @@ shipped `Genesis8_Female.avt` loads with no arrangement points, and
 stays `[]`. `SetArrangement(piece, 0)` then does nothing, while `GetArrangementOfPattern`
 still answers with a full-looking record (`{'ArrangementName': 'Arrangement Point',
 'ArrangementOffsetX': '50', ...}`), so the readback does not reveal it either.
-Arrangement points come with Library avatars, which this edition does not have. Without
-them a garment can still be drafted, sewn, simulated and exported — it simply falls
-rather than draping on the body.
+Without them a garment can still be drafted, sewn, simulated and exported — it simply
+falls rather than draping on the body.
 
-**An imported avatar can carry them, so the empty list is not a property of the edition.**
-The `Nardo` avatar imported from `.obj` reported 109 named points (`Arm_Back_1_L`,
-each with offsets, orientation and a `Curved`/`Flat` type) on 2026-09-19, 2026.0.315.
-Read `GetArrangementList()` rather than assuming either way.
+**MD ships the points, and they can be added.** An earlier version of this document said
+arrangement points come only with Library avatars; that was wrong. Measured 2026-10-12 on
+2026.0.315: after `ImportAvatar` of `Genesis8_Female.avt`,
+`import_api.ImportFile(".../Preset/Avatar/Arrangement/Adult_V2_Arrangement_Bounding_Volume.pan")`
+(returns `True`, the list stays empty) and then
+`ImportFile(".../Adult_V2_Arrangement_Point.arr")` gave **109 points**, and they sit on
+this body: `Body_Front_Center_1` landed a probe at z +122 by a chest front at +134,
+`Body_Back_Center_1` at −149, `Body_Front_Center_5` at y 972 and `Shoulder_L` at
+x 129, y 1492. The folder also holds `Adult_V1_*` and `Kid_*` sets.
+
+**An imported avatar can carry them too.** The `Nardo` avatar imported from `.obj`
+reported 109 named points (`Arm_Back_1_L`, each with offsets, orientation and a
+`Curved`/`Flat` type) on 2026-09-19, 2026.0.315. Read `GetArrangementList()` rather than
+assuming either way.
 
 ### A point's name is not its position
 
@@ -412,6 +439,38 @@ in 0.03 s — in millimetres, `y` up, `+z` the avatar's front; `Nardo`'s group w
 `Mesh`. Check the file exists before parsing it: see Execution environment for an export
 that reports success and writes nothing.
 
+**`+x` is the avatar's left.** A front piece arranged facing out had its 2D `+x` at 3D
+`+x`, the avatar's left; a back piece arranged behind came back mirrored, 2D `+x` to the
+avatar's right (2026-10-12). Which is why two identically drafted panels sewn side to
+side take `ends="opposite"`.
+
+**Sections, not vertex bands.** Genesis 8's torso vertices are sparse enough that a
+16 mm band at 1150 mm split the torso into three clusters. Cutting the triangles with
+the plane and joining the segments through the edges they cross gives one closed loop
+per body part at every height, which is how `md_body` measures (waist 662 mm at 1157,
+hip 1017 at 892, bust 937 at 1342, neck base 477 at 1507, measured as tape would: round
+the convex hull).
+
+### A garment vertex knows its pattern position
+
+**Every garment vertex in an OBJ carries a `vt`, and it is the vertex's 2D pattern
+position — up to an affine map that depends on the fabric.** Measured 2026-10-12 on
+2026.0.315, one `g` group per piece and one `vt` per `v`:
+
+| Fabric | `vt` of a 620 × 580 mm panel |
+| --- | --- |
+| MD's default `FABRIC 1` | millimetres, centred on the piece's 2D box: the corner drafted at (−310, 0) came back as `vt −310 −290` |
+| `V2_Cut_Sew_Knit_Jersey_1` | about −2..2: scaled by the texture's size |
+| `V2_Woven_Twill_1` | scaled differently along u and v |
+
+So nothing should read `vt` as millimetres. `md_fit` registers each piece: it takes the
+outline from `ExportPatternJSON`, normalises both outlines by their area moments (which
+reduces any affine map to a rotation or reflection), searches the start and direction,
+and then fits a full affine map to every outline vertex. On both fabrics above the worst
+vertex landed within 0.12 mm of the pattern. Any trapezoid is its own mirror image under
+an affine map, so for such pieces the map is chosen closest to the texture's own axes —
+which is how MD lays its textures.
+
 ---
 
 ## Placing pieces in 3D
@@ -432,6 +491,71 @@ which import discards; and `ResetClothArrangement` after such an import.
 **And a point's name does not say where it is.** Resolve the point's world position, and
 after arranging export an OBJ and read the piece's bounding box — nothing else reports it.
 
+**`Curved` can start a seam crossed.** A two-panel skirt on Genesis 8, arranged `Curved`
+at `Body_Front_Center_5` and `Body_Back_Center_5` with the points' own values, wrapped
+each panel round the hips: 513 of the front's vertices started inside the body, up to
+47 mm deep, and the side edges ended past each other. Draped 600 steps, one side seam
+stayed open over its lowest 100 mm while the ledger showed it sewn full length. The same
+panels arranged `Flat` started as two planes, 290–315 mm apart at the seams, and draped
+with both side seams closed (2026-10-12). `md_fit` before a drape reports the first case
+— cloth inside the body — and `md_place` raises the offset until there is none.
+
+**A path between seam partners that crosses a limb is usually fine.** T-shirt side seams
+whose straight paths between partners crossed an arm and a sleeve in 4 of 16 places
+closed in the drape, on the A-posed Genesis 8 (2026-10-12).
+
+**Two arranged pieces through each other end up apart.** Jacket fronts with 40 mm
+centre-front extensions, arranged at `Body_Front_3_L` and `_R`, started 84 mesh edges
+through each other down the whole front; draped, one was flung round to its side seam,
+140-160 mm off the body. `md_fit` reports pieces through each other, and `md_place`
+raises a piece's offset until it is clear of every piece it placed before: the fronts
+then started layered and stayed on the front (2026-10-12).
+
+**Place sleeves before the body.** Placed after the back, `md_place` moved each sleeve
+out to clear it (offset 68 to 81-90), and its underarm seam then closed through the
+upper arm, where the arm joins the body and there is no end to slip round. Placed first,
+at offset 67-71, the same sleeves draped clean and the back stepped out instead.
+
+## Fitting tops on an A-posed avatar
+
+Measured 2026-10-12 on Genesis 8 Female, 2026.0.315, with `md_fit`.
+
+**Front and back are not quarters.** Genesis 8's bust is 560 mm round the front and 378
+behind (`md_body`'s arcs, split at the widest points in x); the hips 481 and 536. A
+jacket drafted in quarters had a back 160 mm too wide and fronts that could not cover
+the bust; drafted to the arcs it fitted. A T-shirt likewise lost a fold at the sleeve.
+
+**An armhole needs ease over the arm root.** Measured in the armhole's own plane the arm
+root was 290-430 mm. Drafted at 430 mm the jacket's armholes stretched 12 % and the arm
+came through the sleeve; at 477-495 mm, 1-6 %. Deepening it on an open front made
+things worse, not better, until the front was held (below).
+
+**A sleeve's underarm seam is the arm's length; the cap sits on top.** Holding a sleeve's
+whole length fixed shortened its underarm seam as the cap grew taller, and the taut seam
+cut into the arm's underside, 20-45 mm from it. A 400 mm seam with the cap above draped
+clean; 420 put the cuff over the hand.
+
+**Open fronts swing.** Unheld jacket fronts hung 250-480 mm apart and rotated the body
+cloth round, carrying the side seams under the arms (x = 250-284 mm, against a 135 mm
+torso) and the arms through the cloth. Splitting each centre-front edge round a 30 mm
+tack at the waist and sewing the two tacks together held them: lapels 0-105 mm apart,
+the skirt below 17-80 mm, the drape clean.
+
+**A ring is measured against the body in its own plane.** A cuff's horizontal section
+at its mean height cut the torso and both arms (817 mm); in the cuff's plane, the wrist
+(167 mm). A neckline dropping 70 mm at the front went round 580-630 mm of body in its
+plane against 477 mm horizontally at the neck base.
+
+**Necklines carry an open jacket, and jersey stretches under its own weight.** With no
+collar or facing a tweed jacket's neckline was 10-18 % longer than drafted however wide
+or deep it was cut. Jersey T-shirt armholes with about 100 mm of ease settled 5-8 %
+longer, and the hem 2 %; woven hems 0-1 %. `md_fit` warns above 5 %, so read a knit's
+warnings against its fabric.
+
+**Plain waists slide.** Shorts with 16 mm of waist ease slid 74 mm onto the hips and
+stretched 17 %, taking the hems 60 mm down; elastic on the four waist lines held them at
+1125 mm, 2.7 % stretched -- as on the skirt under Fabric and materials.
+
 **A workaround that got cloth onto the body, and is not a way to build a garment:** draft
 pieces short, so that their bounding-box centre, and so the piece, arranges near the
 target; sew and simulate; then lengthen with `MovePatternPoint` between simulation runs.
@@ -445,6 +569,22 @@ corner carries the adjacent curve with it.
 ---
 
 ## Fabric and materials
+
+**A garment hangs where its fabric stretches enough to hold it.** A two-panel skirt on
+Genesis 8 with a 682 mm waist settled with its waist at 1069 mm, 827 mm long — **21 %
+longer than drafted** — in MD's default `FABRIC 1`, and at 1099 mm, 13 % longer, in
+`V2_Woven_Twill_1`. Drafting the waist 20 mm under the body's girth barely moved it
+(1112 mm, 16 %), and 1500 further steps changed nothing: it is the drape's equilibrium,
+not an unfinished one. The hem in the same drapes measured within 0.5 mm of its drafted
+length. Measured 2026-10-12, 2026.0.315, with `md_fit`'s rings (`stretch_pct`). A
+skirt that stays at the waist needs something the drape does not give a plain panel.
+
+**Elastic on a line gives it.** `SetPatternPieceElastic(piece, line, True)` and
+`SetPatternPieceElasticTotalLength(piece, line, mm)` on both waist edges of the twill
+skirt above held its waist at 1149 mm — the body's waist is at 1157 — with the ring
+1.3 % over its drafted length instead of 13 %. Total lengths of 300 and 250 mm per edge
+gave the same drape: the ring tightened until the body stopped it. Neither call has a
+getter; this is how to know they took effect.
 
 **`fabric_api.GetFabricCount()` is unreliable rather than always wrong.** A new project
 reports `0` while `GetFabricName(0)` answers `'FABRIC 1'` and the Object Browser shows
@@ -599,6 +739,30 @@ lists every point of every line, a type-`2` point coming back as `PointType "Pol
 (2026-10-11, 2026.0.315). A shape can still be wrong in ways nothing but simulation or an
 eye will show.
 
+**A piece's 2D box is two calls.** `GetBoundingBoxOfPattern(i)` answers only
+`{"Width": "300.000000", "Height": "300.000000"}` — strings, and no position — and
+`GetPatternPiecePos(i)` the box's centre (2026-10-12, 2026.0.315).
+
+### Keeping data with the garment
+
+**`utility_api.SetAPIMetaData(key, value)` returned `False` for every key tried and
+stored nothing**; `GetAPIMetaData` then answered `''`. Measured 2026-10-12 on 2026.0.315,
+on an empty scene and on one holding a piece, with a dotted key and a plain one.
+
+**The garment's own metadata works.** `GetMetaDataForCurrentGarment()` returns a JSON
+object as a string, `"{\n}"` for a new project. `ChangeMetaDataValueForCurrentGarment(key,
+value)` adds or replaces one key and leaves the others — a second key was added beside
+the first — while `SetMetaDataForCurrentGarment(json)` replaces the whole object. Same
+day, same build:
+
+| After | The metadata |
+| --- | --- |
+| `ExportZPac`, `NewProject`, `ImportZpac` of that file | back, both keys intact |
+| `NewProject` | `"{\n}"` |
+
+So it travels with a checkpoint. `md_draft_piece` keeps its edge names under the key
+`md_mcp.pieces`, and `md_restore` brings them back with the garment.
+
 ---
 
 ## Adding a sewing pattern
@@ -709,6 +873,16 @@ the formats that actually move a pattern in and out.
 
 `export_api.ExportSnapshot3D(path)` **does** work, and is the one that can be relied on —
 note it returns a list of lists, `[['C:/.../shot.png']]`.
+
+With MD's 3D window closed it raises a modal "Snapshot is only available when the 3D
+window is displayed" instead, which holds the main thread until clicked (2026-10-12).
+
+**`export_api.ExportSnapshot2D(path, mode)` draws the 2D pattern**, and returns `[]`
+having written the file. Mode 0 draws every piece's outline whole, about 10500 px wide,
+whatever the 2D window shows; mode 1 captured the 2D window as it was zoomed. On an empty
+board it raises a modal "There are no patterns". Measured 2026-10-12, 2026.0.315: mode 0
+between two 3D snapshots left the 3D window open. The window had been found closed after
+the first trial of modes 0-2, and mode 1 was not called again to find out which closed it.
 
 ### Seeing the garment: `SetCamViewPoint`, not `SetViewPoint`
 
